@@ -1,0 +1,283 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile information, settings, and biometric preferences",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "description": "Unique user ID" },
+        "name": { "type": "string", "maxLength": 100, "description": "User display name" },
+        "email": { "type": "string", "maxLength": 150, "description": "User email address" },
+        "age": { "type": "number", "description": "User age in years" },
+        "heightCm": { "type": "number", "description": "User height in cm" },
+        "weightUnit": { "type": "string", "enum": ["kg", "lbs"], "description": "Preferred weight unit" },
+        "waterUnit": { "type": "string", "enum": ["ml", "oz"], "description": "Preferred water unit" },
+        "distanceUnit": { "type": "string", "enum": ["km", "mi"], "description": "Preferred distance unit" },
+        "accentColor": { "type": "string", "enum": ["cyan", "emerald", "violet", "amber"], "description": "Preferred accent color" },
+        "updatedAt": { "type": "number", "description": "Epoch timestamp of last update" }
+      },
+      "required": ["userId", "name"]
+    },
+    "UserGoals": {
+      "title": "UserGoals",
+      "description": "Configurable biometric targets and goals",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "description": "Unique user ID" },
+        "dailySteps": { "type": "number", "description": "Daily step target" },
+        "dailyActiveCalories": { "type": "number", "description": "Daily active calorie burn target" },
+        "dailyWaterMl": { "type": "number", "description": "Daily water intake target in ml" },
+        "dailyCalories": { "type": "number", "description": "Daily caloric intake target" },
+        "dailyProteinG": { "type": "number", "description": "Daily protein target in grams" },
+        "dailyCarbsG": { "type": "number", "description": "Daily carbohydrate target in grams" },
+        "dailyFatG": { "type": "number", "description": "Daily fat target in grams" },
+        "dailySleepMinutes": { "type": "number", "description": "Daily sleep target in minutes" },
+        "targetWeightKg": { "type": "number", "description": "Target weight in kg" },
+        "updatedAt": { "type": "number", "description": "Epoch timestamp of last update" }
+      },
+      "required": ["userId", "dailySteps", "dailyWaterMl"]
+    },
+    "WaterLog": {
+      "title": "WaterLog",
+      "description": "Water intake logging entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique log entry ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "amountMl": { "type": "number", "description": "Water amount in ml" },
+        "timestamp": { "type": "number", "description": "Epoch millisecond timestamp" },
+        "source": { "type": "string", "maxLength": 30, "description": "Origin source of entry" }
+      },
+      "required": ["id", "userId", "date", "amountMl", "timestamp"]
+    },
+    "MealLog": {
+      "title": "MealLog",
+      "description": "Logged nutrition and food meal item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique meal ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "mealType": { "type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"], "description": "Type of meal" },
+        "name": { "type": "string", "maxLength": 150, "description": "Meal or dish name" },
+        "calories": { "type": "number", "description": "Calorie count" },
+        "protein": { "type": "number", "description": "Protein in grams" },
+        "carbs": { "type": "number", "description": "Carbohydrates in grams" },
+        "fats": { "type": "number", "description": "Fats in grams" },
+        "serving": { "type": "string", "maxLength": 100, "description": "Portion size description" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" },
+        "source": { "type": "string", "maxLength": 30, "description": "Source tag" }
+      },
+      "required": ["id", "userId", "date", "mealType", "name", "calories", "timestamp"]
+    },
+    "WorkoutLog": {
+      "title": "WorkoutLog",
+      "description": "Logged workout session and exercises",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique workout ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "title": { "type": "string", "maxLength": 150, "description": "Workout title" },
+        "category": { "type": "string", "maxLength": 50, "description": "Workout category" },
+        "durationMinutes": { "type": "number", "description": "Workout duration in minutes" },
+        "caloriesBurned": { "type": "number", "description": "Calories burned estimate" },
+        "notes": { "type": "string", "maxLength": 1000, "description": "Workout notes" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" },
+        "source": { "type": "string", "maxLength": 30, "description": "Source tag" }
+      },
+      "required": ["id", "userId", "date", "title", "durationMinutes", "timestamp"]
+    },
+    "JournalEntry": {
+      "title": "JournalEntry",
+      "description": "Daily reflection, mood, energy and gratitude log",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique journal ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "mood": { "type": "number", "description": "Mood rating 1 to 5" },
+        "energy": { "type": "number", "description": "Energy rating 1 to 5" },
+        "reflection": { "type": "string", "maxLength": 5000, "description": "Daily reflection text" },
+        "gratitude": { "type": "string", "maxLength": 2000, "description": "Gratitude entry" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" },
+        "source": { "type": "string", "maxLength": 30, "description": "Source tag" }
+      },
+      "required": ["id", "userId", "date", "mood", "energy", "reflection", "timestamp"]
+    },
+    "BodyMeasurementLog": {
+      "title": "BodyMeasurementLog",
+      "description": "Body measurement and weight log",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique entry ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "weightKg": { "type": "number", "description": "Weight in kilograms" },
+        "bodyFatPct": { "type": "number", "description": "Body fat percentage" },
+        "waistCm": { "type": "number", "description": "Waist measurement in cm" },
+        "chestCm": { "type": "number", "description": "Chest measurement in cm" },
+        "armsCm": { "type": "number", "description": "Arms measurement in cm" },
+        "hipsCm": { "type": "number", "description": "Hips measurement in cm" },
+        "notes": { "type": "string", "maxLength": 500, "description": "Measurement notes" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" },
+        "source": { "type": "string", "maxLength": 30, "description": "Source tag" }
+      },
+      "required": ["id", "userId", "date", "weightKg", "timestamp"]
+    },
+    "Habit": {
+      "title": "Habit",
+      "description": "User habit tracking definition and progress",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique habit ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "title": { "type": "string", "maxLength": 100, "description": "Habit title" },
+        "category": { "type": "string", "enum": ["mind", "body", "sleep", "recovery", "productivity"], "description": "Habit category" },
+        "targetDaysPerWeek": { "type": "number", "description": "Weekly frequency goal" },
+        "streak": { "type": "number", "description": "Current streak count" },
+        "bestStreak": { "type": "number", "description": "Personal best streak" },
+        "icon": { "type": "string", "maxLength": 50, "description": "Icon identifier" },
+        "color": { "type": "string", "maxLength": 50, "description": "Accent color" },
+        "source": { "type": "string", "maxLength": 30, "description": "Source tag" }
+      },
+      "required": ["id", "userId", "title", "category", "targetDaysPerWeek"]
+    },
+    "DailyPriority": {
+      "title": "DailyPriority",
+      "description": "Daily focus priorities and task items",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique priority item ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "text": { "type": "string", "maxLength": 200, "description": "Task or priority text" },
+        "completed": { "type": "boolean", "description": "Completion status" },
+        "order": { "type": "number", "description": "Display order priority" },
+        "source": { "type": "string", "maxLength": 30, "description": "Source tag" }
+      },
+      "required": ["id", "userId", "date", "text", "completed", "order"]
+    },
+    "StepLog": {
+      "title": "StepLog",
+      "description": "User step and walking activity logs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique log ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "count": { "type": "number", "description": "Step count" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" }
+      },
+      "required": ["id", "userId", "date", "count", "timestamp"]
+    },
+    "SleepLog": {
+      "title": "SleepLog",
+      "description": "User sleep duration and hypnogram logs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique log ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "totalMinutes": { "type": "number", "description": "Total sleep duration in minutes" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" }
+      },
+      "required": ["id", "userId", "date", "totalMinutes", "timestamp"]
+    },
+    "HeartRateLog": {
+      "title": "HeartRateLog",
+      "description": "User heart rate telemetry logs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique log ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "date": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "Date in YYYY-MM-DD format" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp" }
+      },
+      "required": ["id", "userId", "date", "timestamp"]
+    },
+    "SavedFood": {
+      "title": "SavedFood",
+      "description": "Saved reusable food item template",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "description": "Unique food template ID" },
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "name": { "type": "string", "maxLength": 150, "description": "Food item name" },
+        "calories": { "type": "number", "description": "Calories per serving" }
+      },
+      "required": ["id", "userId", "name", "calories"]
+    },
+    "CloudBackupBundle": {
+      "title": "CloudBackupBundle",
+      "description": "Complete encrypted snapshot backup bundle for seamless restore",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "description": "Owner user ID" },
+        "backupData": { "type": "string", "description": "Serialized JSON snapshot payload" },
+        "lastSyncedAt": { "type": "number", "description": "Epoch millisecond timestamp of backup" },
+        "recordCounts": { "type": "string", "maxLength": 500, "description": "Summary metadata of backed up records" }
+      },
+      "required": ["userId", "backupData", "lastSyncedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Primary user profile document containing preferences and personal metrics"
+    },
+    "/users/{userId}/goals/main": {
+      "schema": "UserGoals",
+      "description": "Target biometric goals document for the user"
+    },
+    "/users/{userId}/cloudBackup/latest": {
+      "schema": "CloudBackupBundle",
+      "description": "Latest cloud snapshot backup bundle for offline-first cross-device sync and restore"
+    },
+    "/users/{userId}/waterLogs/{waterLogId}": {
+      "schema": "WaterLog",
+      "description": "Individual daily water intake log entries"
+    },
+    "/users/{userId}/mealLogs/{mealLogId}": {
+      "schema": "MealLog",
+      "description": "Individual nutrition and meal logs"
+    },
+    "/users/{userId}/workoutLogs/{workoutLogId}": {
+      "schema": "WorkoutLog",
+      "description": "Individual workout session logs"
+    },
+    "/users/{userId}/journalEntries/{journalId}": {
+      "schema": "JournalEntry",
+      "description": "Daily journal entries, mood, and reflection entries"
+    },
+    "/users/{userId}/bodyLogs/{bodyLogId}": {
+      "schema": "BodyLog",
+      "description": "Individual weight and body composition measurement logs"
+    },
+    "/users/{userId}/habits/{habitId}": {
+      "schema": "Habit",
+      "description": "User habit tracking records"
+    },
+    "/users/{userId}/dailyPriorities/{priorityId}": {
+      "schema": "DailyPriority",
+      "description": "Daily focus priorities and task entries"
+    },
+    "/users/{userId}/stepLogs/{stepLogId}": {
+      "schema": "StepLog",
+      "description": "User step and walking activity logs"
+    },
+    "/users/{userId}/sleepLogs/{sleepLogId}": {
+      "schema": "SleepLog",
+      "description": "User sleep duration and quality logs"
+    },
+    "/users/{userId}/heartRateLogs/{hrLogId}": {
+      "schema": "HeartRateLog",
+      "description": "User heart rate logs"
+    },
+    "/users/{userId}/savedFoods/{foodId}": {
+      "schema": "SavedFood",
+      "description": "User saved reusable food items"
+    }
+  }
+}

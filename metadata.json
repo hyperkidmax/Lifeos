@@ -1,0 +1,6 @@
+{
+  "name": "LifeOS - Personal Wellness Operating System",
+  "description": "Mobile-first personal wellness web app tracking health metrics, nutrition, hydration, fitness, habits, and body progress.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

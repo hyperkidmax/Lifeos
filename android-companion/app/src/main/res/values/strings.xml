@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">LifeOS HealthBridge</string>
+    <string name="health_connect_status">Health Connect Status</string>
+    <string name="firebase_auth_status">Firebase Account</string>
+    <string name="sign_in_google">Sign in with Google</string>
+    <string name="sign_out">Sign out</string>
+    <string name="grant_health_permissions">Grant Health Permissions</string>
+    <string name="sync_now">Sync Health Data Now</string>
+    <string name="sync_status_idle">Ready to sync</string>
+    <string name="sync_status_syncing">Syncing biometric data to LifeOS Firestore…</string>
+    <string name="sync_status_success">Last synced successfully</string>
+    <string name="sync_status_error">Sync failed. Check connection or permissions.</string>
+    <string name="rationale_title">Why LifeOS needs Health Connect</string>
+    <string name="rationale_description">LifeOS HealthBridge reads steps, sleep cycles, heart rate, and workout duration from Health Connect (synced from Samsung Health &amp; Galaxy Watch 8) to update your personal LifeOS dashboard in real time.\n\nYour health metrics are strictly tied to your private account and are never shared or sold.</string>
+    <string name="privacy_policy">Privacy Policy</string>
+    <string name="btn_close">Close</string>
+
+    <!-- Web Client ID used for Google Sign-In with Firebase Auth -->
+    <string name="default_web_client_id">798288504612-3d6a5ko9qeaj8kom6h6cq3c6p17qppdl.apps.googleusercontent.com</string>
+</resources>
