@@ -136,17 +136,88 @@ export const KNOWN_DEMO_IDS = new Set([
 
 /**
  * Reliably identifies if a record was generated as synthetic demo data.
- * Safety rule: If provenance cannot be reliably confirmed as demo, returns false
- * to prevent accidental deletion of user personal records.
+ * Safety rule:
+ * 1. If record has source === 'demo', it is synthetic demo data.
+ * 2. If record has source === 'manual', 'sensor', 'sensor_disconnected', 'health_connect', it is NEVER demo.
+ * 3. For legacy records without a source field:
+ *    - Step logs with known demo IDs ('step-d0'..'step-d6') or prefix 'step-d' are demo.
+ *    - Sleep logs with known demo IDs ('sleep-today', 'sleep-prev') are demo.
+ *    - Heart rate logs with 'hr-today' are demo.
+ *    - For generic short IDs ('m-1', 'w-1', 'b-1', etc.), DO NOT treat as demo solely based on ID.
+ *      Only classify as demo if known content signatures match the exact synthetic seed payload
+ *      (e.g., exact demo meal names or demo habits) or if explicitly marked source === 'demo'.
+ * 4. In all uncertain cases, return false to strictly protect user personal records.
  */
-export function isDemoRecord(record: { id?: string; source?: string } | undefined | null): boolean {
-  if (!record) return false;
+export function isDemoRecord(record: any): boolean {
+  if (!record || typeof record !== 'object') return false;
+
+  // 1. Explicit source check
   if (record.source === 'demo') return true;
-  if (record.source === 'manual' || record.source === 'sensor') return false;
-  if (record.id) {
-    if (KNOWN_DEMO_IDS.has(record.id)) return true;
-    if (record.id.startsWith('step-d')) return true;
+  if (
+    record.source === 'manual' ||
+    record.source === 'sensor' ||
+    record.source === 'sensor_disconnected' ||
+    record.source === 'health_connect'
+  ) {
+    return false;
   }
+
+  // 2. High-confidence synthetic ID signatures (unique to mock dataset)
+  if (typeof record.id === 'string') {
+    if (record.id.startsWith('step-d')) return true;
+    if (record.id === 'sleep-today' || record.id === 'sleep-prev') return true;
+    if (record.id === 'hr-today') return true;
+
+    // 3. For generic IDs ('m-1', 'w-1', 'wo-1', 'b-1', 'p-1', 'j-1', 'h-1'),
+    // verify synthetic content fingerprint to protect genuine legacy/imported records that may share short IDs
+    if (KNOWN_DEMO_IDS.has(record.id)) {
+      // Workout synthetic check
+      if (record.id === 'wo-1' && record.title === 'Upper Body Hypertrophy') return true;
+      // Meals synthetic check
+      if (
+        (record.id === 'm-1' && record.name === 'Oats with Greek Yogurt & Blueberries') ||
+        (record.id === 'm-2' && record.name === 'Grilled Chicken, Jasmine Rice & Avocado') ||
+        (record.id === 'm-3' && record.name === 'Whey Protein Shake & Almonds')
+      ) {
+        return true;
+      }
+      // Water synthetic check
+      if (['w-1', 'w-2', 'w-3', 'w-4'].includes(record.id)) {
+        // Only classify as demo if it lacks explicit real provenance and matches demo timestamps or context
+        // If there's any ambiguity, do NOT classify as demo
+        return false;
+      }
+      // Habit synthetic check
+      if (
+        (record.id === 'h-1' && record.title === 'Morning Sunlight & Hydration') ||
+        (record.id === 'h-2' && record.title === '10,000 Daily Steps') ||
+        (record.id === 'h-3' && record.title === 'Evening Mobility & Stretching') ||
+        (record.id === 'h-4' && record.title === 'No Blue Light 45m Before Bed')
+      ) {
+        return true;
+      }
+      // Priority synthetic check
+      if (
+        (record.id === 'p-1' && record.text?.includes('Upper body hypertrophy')) ||
+        (record.id === 'p-2' && record.text?.includes('160g protein target')) ||
+        (record.id === 'p-3' && record.text?.includes('30-minute afternoon walk'))
+      ) {
+        return true;
+      }
+      // Journal synthetic check
+      if (record.id === 'j-1' && record.reflection?.includes('High productivity day')) {
+        return true;
+      }
+      // Body log synthetic check
+      if (
+        (record.id === 'b-1' && record.notes === 'Weekly weigh-in') ||
+        (record.id === 'b-3' && record.notes?.includes('Feeling leaner'))
+      ) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 

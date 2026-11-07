@@ -7,7 +7,7 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Helper functions
+    // Authentication and Identity Helpers
     function isSignedIn() {
       return request.auth != null;
     }
@@ -20,15 +20,28 @@ service cloud.firestore {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function incoming() {
-      return request.resource.data;
+    function isValidTombstoneId(id) {
+      return id is string && id.size() > 0 && id.size() <= 260 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function existing() {
-      return resource.data;
+    // Server-Controlled Generation Authority Check
+    // Rules Access Limit Note: All document writes in a batch evaluate the exact same path
+    // (/users/{userId}/meta/sync). Firestore caches this single document lookup, consuming
+    // exactly 1 access call out of the 20-call aggregate batch ceiling.
+    function getSyncMeta(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)/meta/sync).data;
     }
 
-    // Entity validation blueprints
+    function isValidWriteGeneration(userId, data) {
+      let syncMeta = getSyncMeta(userId);
+      return syncMeta != null &&
+             syncMeta.currentGeneration is int &&
+             data.keys().hasAll(['_gen']) &&
+             data._gen is int &&
+             data._gen == syncMeta.currentGeneration;
+    }
+
+    // Entity Blueprints
     function isValidUserProfile(data, userId) {
       return data.userId == userId &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 100;
@@ -37,7 +50,6 @@ service cloud.firestore {
     function isValidUserGoals(data, userId) {
       return data.userId == userId &&
              data.keys().hasAll(['userId', 'dailySteps', 'dailyWaterMl']) &&
-             data.keys().hasOnly(['userId', 'dailySteps', 'dailyActiveCalories', 'dailyWaterMl', 'dailyCalories', 'dailyProteinG', 'dailyCarbsG', 'dailyFatG', 'dailySleepMinutes', 'targetWeightKg', 'updatedAt']) &&
              data.dailySteps is number && data.dailySteps >= 0 && data.dailySteps <= 200000 &&
              data.dailyWaterMl is number && data.dailyWaterMl >= 0 && data.dailyWaterMl <= 20000;
     }
@@ -45,7 +57,6 @@ service cloud.firestore {
     function isValidCloudBackup(data, userId) {
       return data.userId == userId &&
              data.keys().hasAll(['userId', 'backupData', 'lastSyncedAt']) &&
-             data.keys().hasOnly(['userId', 'backupData', 'lastSyncedAt', 'recordCounts']) &&
              data.backupData is string && data.backupData.size() <= 1048576 &&
              data.lastSyncedAt is number;
     }
@@ -142,115 +153,143 @@ service cloud.firestore {
              data.calories is number && data.calories >= 0 && data.calories <= 20000;
     }
 
-    // User profile matching
+    // User Root Document
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
-      allow create: if isValidId(userId) && isOwner(userId) && isValidUserProfile(incoming(), userId);
-      allow update: if isValidId(userId) && isOwner(userId) && isValidUserProfile(incoming(), userId) && incoming().userId == existing().userId;
-      allow delete: if isValidId(userId) && isOwner(userId);
+      allow create, update: if isValidId(userId) && isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      // User root deletion reserved for complete account closure
+      allow delete: if false;
 
-      // User daily goals
+      // System Metadata: READABLE BY OWNER, WRITABLE ONLY BY ADMIN SDK
+      match /meta/sync {
+        allow get: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      match /meta/reset {
+        allow get: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      // Permanent Tombstone Registry: READABLE BY OWNER, WRITABLE ONLY BY ADMIN SDK
+      match /tombstones/{tombstoneId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      // Goals Subcollection
       match /goals/{goalId} {
         allow get: if isValidId(userId) && isValidId(goalId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(goalId) && isOwner(userId) && isValidUserGoals(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(goalId) && isOwner(userId) && isValidUserGoals(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(goalId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(goalId) && isOwner(userId) &&
+                                 isValidUserGoals(request.resource.data, userId);
+        allow delete: if false;
       }
 
-      // Cloud backup bundle
+      // Cloud Backup Bundle
       match /cloudBackup/{backupId} {
         allow get: if isValidId(userId) && isValidId(backupId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(backupId) && isOwner(userId) && isValidCloudBackup(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(backupId) && isOwner(userId) && isValidCloudBackup(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(backupId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(backupId) && isOwner(userId) &&
+                                 isValidCloudBackup(request.resource.data, userId);
+        allow delete: if false;
       }
 
-      // Hydration subcollection
-      match /waterLogs/{logId} {
+      // 1. Water Logs
+      match /waterLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(logId) && isOwner(userId) && isValidWaterLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(logId) && isOwner(userId) && isValidWaterLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(logId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidWaterLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Meals subcollection
-      match /mealLogs/{mealId} {
+      // 2. Meal Logs
+      match /mealLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(mealId) && isOwner(userId) && isValidMealLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(mealId) && isOwner(userId) && isValidMealLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(mealId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidMealLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Workouts subcollection
-      match /workoutLogs/{workoutId} {
+      // 3. Workout Logs
+      match /workoutLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(workoutId) && isOwner(userId) && isValidWorkoutLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(workoutId) && isOwner(userId) && isValidWorkoutLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(workoutId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidWorkoutLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Journal subcollection
-      match /journalEntries/{journalId} {
+      // 4. Journal Entries
+      match /journalEntries/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(journalId) && isOwner(userId) && isValidJournalEntry(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(journalId) && isOwner(userId) && isValidJournalEntry(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(journalId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidJournalEntry(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Body measurement subcollection
-      match /bodyLogs/{bodyLogId} {
+      // 5. Body Measurement Logs
+      match /bodyLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(bodyLogId) && isOwner(userId) && isValidBodyLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(bodyLogId) && isOwner(userId) && isValidBodyLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(bodyLogId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidBodyLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Habits subcollection
-      match /habits/{habitId} {
+      // 6. Habits
+      match /habits/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(habitId) && isOwner(userId) && isValidHabit(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(habitId) && isOwner(userId) && isValidHabit(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(habitId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidHabit(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Priorities subcollection
-      match /dailyPriorities/{priorityId} {
+      // 7. Daily Priorities
+      match /dailyPriorities/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(priorityId) && isOwner(userId) && isValidDailyPriority(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(priorityId) && isOwner(userId) && isValidDailyPriority(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(priorityId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidDailyPriority(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Steps subcollection
-      match /stepLogs/{stepId} {
+      // 8. Step Logs
+      match /stepLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(stepId) && isOwner(userId) && isValidStepLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(stepId) && isOwner(userId) && isValidStepLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(stepId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidStepLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Sleep subcollection
-      match /sleepLogs/{sleepId} {
+      // 9. Sleep Logs
+      match /sleepLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(sleepId) && isOwner(userId) && isValidSleepLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(sleepId) && isOwner(userId) && isValidSleepLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(sleepId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidSleepLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Heart Rate subcollection
-      match /heartRateLogs/{hrId} {
+      // 10. Heart Rate Logs
+      match /heartRateLogs/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(hrId) && isOwner(userId) && isValidHeartRateLog(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(hrId) && isOwner(userId) && isValidHeartRateLog(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(hrId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidHeartRateLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
 
-      // Saved Foods subcollection
-      match /savedFoods/{foodId} {
+      // 11. Saved Foods
+      match /savedFoods/{id} {
         allow get, list: if isValidId(userId) && isOwner(userId);
-        allow create: if isValidId(userId) && isValidId(foodId) && isOwner(userId) && isValidSavedFood(incoming(), userId);
-        allow update: if isValidId(userId) && isValidId(foodId) && isOwner(userId) && isValidSavedFood(incoming(), userId) && incoming().userId == existing().userId;
-        allow delete: if isValidId(userId) && isValidId(foodId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidSavedFood(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
       }
     }
   }

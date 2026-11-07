@@ -262,12 +262,12 @@ export const SettingsView: React.FC = () => {
   const handleImportSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!importText.trim()) return;
-    const ok = importDataJson(importText.trim());
-    if (ok) {
-      setImportMessage({ text: 'Data imported successfully! Reloaded profile & logs.' });
+    const result = importDataJson(importText.trim(), { mode: 'merge' });
+    if (result.success) {
+      setImportMessage({ text: result.message });
       setImportText('');
     } else {
-      setImportMessage({ text: 'Invalid JSON backup format. Please verify the file.', error: true });
+      setImportMessage({ text: result.message, error: true });
     }
   };
 

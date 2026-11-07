@@ -1,4 +1,4 @@
-export type MetricSource = 'manual' | 'demo' | 'sensor_disconnected' | 'health_connect';
+export type MetricSource = 'manual' | 'demo' | 'sensor_disconnected' | 'health_connect' | 'sensor' | 'import';
 
 export interface StepLog {
   id: string;
@@ -83,6 +83,9 @@ export interface MealLog {
   serving: string;
   timestamp: number;
   source?: MetricSource;
+  updatedAt?: number;
+  _gen?: number;
+  _conflicts?: Record<string, any>;
 }
 
 export interface WorkoutSet {
@@ -185,6 +188,33 @@ export interface Goals {
   targetWeightKg?: number;
 }
 
+export interface RecordTombstone {
+  id: string;
+  collection: string;
+  deletedAt: number;
+  deletedByUid?: string;
+  generation: number;
+  tombstoneVersion: number;
+}
+
+export interface SyncMetaDocument {
+  userId: string;
+  currentGeneration: number;
+  generationEstablishedAt?: number;
+  activeResetId: string | null;
+  minimumValidTimestamp?: number;
+}
+
+export interface ResetProgressDocument {
+  userId: string;
+  resetId: string;
+  status: 'idle' | 'in_progress' | 'verifying' | 'completed' | 'failed';
+  startedAt?: number;
+  completedAt?: number | null;
+  targetGeneration: number;
+  deletedCount: number;
+}
+
 export interface LifeOSData {
   version: number;
   isDemoMode: boolean;
@@ -201,4 +231,9 @@ export interface LifeOSData {
   dailyPriorities: DailyPriority[];
   journalEntries: JournalEntry[];
   bodyLogs: BodyMeasurementLog[];
+  tombstones?: RecordTombstone[];
+  pendingTombstones?: RecordTombstone[];
+  generation?: number;
+  quarantinedRecords?: Record<string, any[]>;
 }
+

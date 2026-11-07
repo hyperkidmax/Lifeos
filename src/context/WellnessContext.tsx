@@ -25,9 +25,15 @@ import {
   signOutFromFirebase as firebaseSignOut,
   syncAndMergeWithCloud,
   saveAllUserRecordsToFirestore,
+  deleteRecordViaCloudFunction,
+  startGlobalResetViaCloudFunction,
+  executeResetChunkViaCloudFunction,
+  verifyAndFinalizeResetViaCloudFunction,
 } from '../services/firebase';
+import { localDb } from '../services/localDb';
 
 const STORAGE_KEY = 'lifeos_wellness_data_v1';
+
 
 export type ActiveTab = 'home' | 'health' | 'nutrition' | 'fitness' | 'myday' | 'progress' | 'settings';
 
@@ -125,7 +131,10 @@ interface WellnessContextType {
   loadDemoData: () => void;
   clearAllData: () => void;
   exportDataJson: () => string;
-  importDataJson: (json: string) => boolean;
+  importDataJson: (
+    json: string,
+    options?: { mode?: 'merge' | 'replace'; confirmedReplace?: boolean }
+  ) => { success: boolean; message: string; importedCount?: number; replaced?: boolean };
 
   // Computed metrics for selected date
   todaySteps: StepLog | undefined;
@@ -622,18 +631,39 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
     }));
   };
 
+  // Central durable deletion handler: Atomic local commit + Cloud Function execution
+  const executeDurableDeletion = (collection: string, id: string) => {
+    const currentGen = dataRef.current.generation || 1;
+    const uid = currentUser?.uid || 'anonymous';
+
+    // 1. Transactionally remove from local state & queue tombstone
+    localDb
+      .atomicallyRemoveRecordAndQueueTombstone(uid, collection, id, currentGen, dataRef.current)
+      .then(({ updatedData }) => {
+        setData(updatedData);
+      });
+
+    // 2. Asynchronously commit deletion and tombstone to Cloud Functions if authenticated & online
+    if (currentUser && navigator.onLine) {
+      deleteRecordViaCloudFunction(collection, id)
+        .then((res) => {
+          if (res.success) {
+            localDb.markTombstoneSynced(currentUser.uid, collection, id);
+          }
+        })
+        .catch((err) => {
+          console.warn('Cloud Function deletion failed; queued for background sync:', err);
+        });
+    }
+  };
+
   const removeWaterLog = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      waterLogs: prev.waterLogs.filter((w) => w.id !== id),
-    }));
+    executeDurableDeletion('waterLogs', id);
   };
 
   const clearTodayWater = () => {
-    setData((prev) => ({
-      ...prev,
-      waterLogs: prev.waterLogs.filter((w) => w.date !== selectedDate),
-    }));
+    const todayLogs = dataRef.current.waterLogs.filter((w) => w.date === selectedDate);
+    todayLogs.forEach((w) => executeDurableDeletion('waterLogs', w.id));
   };
 
   const logMeal = (meal: Omit<MealLog, 'id' | 'timestamp'>) => {
@@ -650,10 +680,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deleteMeal = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      mealLogs: prev.mealLogs.filter((m) => m.id !== id),
-    }));
+    executeDurableDeletion('mealLogs', id);
   };
 
   const saveFoodTemplate = (food: Omit<FoodItem, 'id'>) => {
@@ -669,10 +696,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deleteFoodTemplate = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      savedFoods: prev.savedFoods.filter((f) => f.id !== id),
-    }));
+    executeDurableDeletion('savedFoods', id);
   };
 
   const logWorkout = (workout: Omit<WorkoutLog, 'id' | 'timestamp'>) => {
@@ -689,10 +713,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deleteWorkout = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      workoutLogs: prev.workoutLogs.filter((w) => w.id !== id),
-    }));
+    executeDurableDeletion('workoutLogs', id);
   };
 
   const toggleHabit = (habitId: string, date = selectedDate) => {
@@ -738,10 +759,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deleteHabit = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      habits: prev.habits.filter((h) => h.id !== id),
-    }));
+    executeDurableDeletion('habits', id);
   };
 
   const addPriority = (text: string) => {
@@ -770,10 +788,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deletePriority = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      dailyPriorities: prev.dailyPriorities.filter((p) => p.id !== id),
-    }));
+    executeDurableDeletion('dailyPriorities', id);
   };
 
   const saveJournalEntry = (entry: Omit<JournalEntry, 'id' | 'timestamp'>): boolean => {
@@ -811,18 +826,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deleteJournalEntry = (id: string) => {
-    setData((prev) => {
-      const nextState = {
-        ...prev,
-        journalEntries: prev.journalEntries.filter((j) => j.id !== id),
-      };
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
-      } catch (e) {
-        console.error('Failed to sync journal deletion to local storage', e);
-      }
-      return nextState;
-    });
+    executeDurableDeletion('journalEntries', id);
   };
 
   const logBodyMeasurement = (log: Omit<BodyMeasurementLog, 'id' | 'timestamp'>) => {
@@ -839,11 +843,9 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const deleteBodyMeasurement = (id: string) => {
-    setData((prev) => ({
-      ...prev,
-      bodyLogs: prev.bodyLogs.filter((b) => b.id !== id),
-    }));
+    executeDurableDeletion('bodyLogs', id);
   };
+
 
   const updateProfile = (profile: Partial<UserProfile>) => {
     setData((prev) => ({
@@ -927,7 +929,9 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   const setOperatingMode = (mode: 'real' | 'demo') => {
     if (mode === 'real') {
       setData((prev) => {
-        const nextState = { ...prev, isDemoMode: false };
+        // Purge synthetic demo records from active local state while strictly preserving
+        // all genuine manual, sensor, imported, and legacy personal records.
+        const nextState = filterOutDemoRecords(prev);
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
         } catch (e) {
@@ -940,28 +944,296 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
     }
   };
 
-  const clearAllData = () => {
-    setData({
-      ...EMPTY_INITIAL_STATE,
-      isDemoMode: false,
-    });
+  const clearAllData = async () => {
+    if (currentUser && navigator.onLine) {
+      try {
+        setSyncStatus('syncing');
+        // Phase 1: Start global reset on server
+        const startRes = await startGlobalResetViaCloudFunction();
+        if (!startRes.success) {
+          throw new Error(startRes.error || 'Failed to initialize server reset');
+        }
+
+        // Phase 2: Stepped execution loop (up to 25 chunks of 400 docs = 10,000 docs)
+        let finished = false;
+        let attempts = 0;
+        while (!finished && attempts < 25) {
+          attempts++;
+          const chunkRes = await executeResetChunkViaCloudFunction();
+          if (!chunkRes.success) {
+            throw new Error(chunkRes.error || 'Chunk deletion failed');
+          }
+          finished = Boolean(chunkRes.isFinished);
+        }
+
+        // Phase 3: Verification
+        const verifyRes = await verifyAndFinalizeResetViaCloudFunction();
+        if (!verifyRes.success) {
+          throw new Error(verifyRes.error || 'Reset verification failed');
+        }
+
+        // Clean local state under new generation
+        const cleanState: LifeOSData = {
+          ...EMPTY_INITIAL_STATE,
+          isDemoMode: false,
+          generation: startRes.newGeneration || (dataRef.current.generation || 1) + 1,
+          tombstones: [],
+          pendingTombstones: [],
+        };
+        setData(cleanState);
+        await localDb.saveUserData(currentUser.uid, cleanState);
+        setSyncStatus('synced');
+      } catch (err: any) {
+        console.error('Server-side reset failed:', err);
+        setSyncStatus('error');
+        setSyncError(err.message || 'Reset failed');
+      }
+    } else {
+      // Local-only wipe
+      const cleanState: LifeOSData = {
+        ...EMPTY_INITIAL_STATE,
+        isDemoMode: false,
+        generation: (dataRef.current.generation || 1) + 1,
+        tombstones: [],
+        pendingTombstones: [],
+      };
+      setData(cleanState);
+      const uid = currentUser?.uid || 'anonymous';
+      await localDb.saveUserData(uid, cleanState);
+    }
   };
 
   const exportDataJson = () => {
     return JSON.stringify(data, null, 2);
   };
 
-  const importDataJson = (json: string): boolean => {
+  // REPAIR 2: Safe JSON Backup and Restore
+  // Validates structure and schema version, creates local snapshot before restoring,
+  // preserves genuine records, filters demo data, assigns 'import' provenance only when needed,
+  // prevents tombstoned/deleted records from being restored, and supports safe non-destructive merging by default.
+  const importDataJson = (
+    json: string,
+    options: { mode?: 'merge' | 'replace'; confirmedReplace?: boolean } = {}
+  ): { success: boolean; message: string; importedCount?: number; replaced?: boolean } => {
+    const mode = options.mode || 'merge';
+
     try {
-      const parsed = JSON.parse(json);
-      if (parsed && parsed.goals && parsed.profile) {
-        setData(parsed);
-        return true;
+      if (!json || typeof json !== 'string' || !json.trim()) {
+        return { success: false, message: 'Import failed: Empty or blank JSON payload provided.' };
       }
-      return false;
-    } catch (e) {
-      console.error('Import error', e);
-      return false;
+
+      // 1. Validate JSON syntax
+      let parsed: any;
+      try {
+        parsed = JSON.parse(json);
+      } catch (err: any) {
+        return { success: false, message: `JSON syntax error: ${err.message || 'Invalid JSON format'}` };
+      }
+
+      if (!parsed || typeof parsed !== 'object') {
+        return { success: false, message: 'Import failed: Root JSON payload must be an object.' };
+      }
+
+      // 2. Validate schema and required root objects
+      if (!parsed.profile || typeof parsed.profile !== 'object') {
+        return { success: false, message: 'Import failed: Missing required "profile" configuration in backup.' };
+      }
+      if (!parsed.goals || typeof parsed.goals !== 'object') {
+        return { success: false, message: 'Import failed: Missing required "goals" configuration in backup.' };
+      }
+
+      // Check version compatibility (support version 1 and future backward-compatible integers)
+      if (parsed.version !== undefined && (typeof parsed.version !== 'number' || parsed.version < 1)) {
+        return { success: false, message: `Import failed: Unsupported schema version (${parsed.version}). Expected >= 1.` };
+      }
+
+      // 3. Create recoverable snapshot of current local storage data before any modification
+      try {
+        const currentBackup = localStorage.getItem(STORAGE_KEY);
+        if (currentBackup) {
+          localStorage.setItem(`${STORAGE_KEY}_pre_restore_snapshot`, currentBackup);
+        }
+      } catch (snapshotErr) {
+        console.warn('Could not write pre-restore snapshot to localStorage:', snapshotErr);
+      }
+
+      // 4. Sanitize and normalize incoming logs:
+      // - Filter out any positively confirmed demo records
+      // - Reject records matching active tombstones to prevent resurrection of deleted data
+      // - Preserve genuine historical provenance ('manual', 'sensor', 'health_connect', 'sensor_disconnected')
+      // - Stamp 'import' only if the incoming record is genuine and has no existing provenance
+      const tombstoneIds = new Set((dataRef.current.tombstones || []).map((t) => t.id));
+      const activeGeneration = dataRef.current.generation || 1;
+
+      const sanitizeImportList = <T extends { id: string; source?: any; _gen?: number }>(
+        list: T[] | undefined
+      ): T[] => {
+        if (!Array.isArray(list)) return [];
+        const clean: T[] = [];
+        for (const item of list) {
+          if (!item || typeof item !== 'object' || !item.id) continue;
+          if (isDemoRecord(item)) continue; // Never import synthetic demo records into user data
+          if (tombstoneIds.has(item.id)) continue; // Never resurrect deleted/tombstoned records
+
+          // Preserve existing valid provenance, or assign 'import' if unassigned
+          let source = item.source;
+          if (!source || (source !== 'manual' && source !== 'sensor' && source !== 'health_connect' && source !== 'sensor_disconnected' && source !== 'import')) {
+            source = 'import';
+          }
+
+          clean.push({
+            ...item,
+            source,
+            _gen: item._gen || activeGeneration,
+          });
+        }
+        return clean;
+      };
+
+      const importedSteps = sanitizeImportList<StepLog>(parsed.stepLogs);
+      const importedSleep = sanitizeImportList<SleepLog>(parsed.sleepLogs);
+      const importedHr = sanitizeImportList<HeartRateLog>(parsed.heartRateLogs);
+      const importedWater = sanitizeImportList<WaterLog>(parsed.waterLogs);
+      const importedMeals = sanitizeImportList<MealLog>(parsed.mealLogs);
+      const importedWorkouts = sanitizeImportList<WorkoutLog>(parsed.workoutLogs);
+      const importedHabits = sanitizeImportList<Habit>(parsed.habits);
+      const importedPriorities = sanitizeImportList<DailyPriority>(parsed.dailyPriorities);
+      const importedJournal = sanitizeImportList<JournalEntry>(parsed.journalEntries);
+      const importedBodyLogs = sanitizeImportList<BodyMeasurementLog>(parsed.bodyLogs);
+      const importedSavedFoods: FoodItem[] = Array.isArray(parsed.savedFoods)
+        ? parsed.savedFoods.filter((f: any) => f && f.id && !isDemoRecord(f))
+        : [];
+
+      const totalImportableLogs =
+        importedSteps.length +
+        importedSleep.length +
+        importedHr.length +
+        importedWater.length +
+        importedMeals.length +
+        importedWorkouts.length +
+        importedHabits.length +
+        importedPriorities.length +
+        importedJournal.length +
+        importedBodyLogs.length;
+
+      // 5. Apply Restore: Either Replace (requires explicit confirmation) or Safe Merge (default)
+      if (mode === 'replace') {
+        if (!options.confirmedReplace) {
+          return {
+            success: false,
+            message: 'Complete replacement requires explicit user confirmation to prevent accidental data loss.',
+          };
+        }
+
+        const nextState: LifeOSData = {
+          version: parsed.version || 1,
+          isDemoMode: false,
+          profile: {
+            ...EMPTY_INITIAL_STATE.profile,
+            ...data.profile,
+            ...parsed.profile,
+          },
+          goals: {
+            ...EMPTY_INITIAL_STATE.goals,
+            ...data.goals,
+            ...parsed.goals,
+          },
+          stepLogs: importedSteps,
+          sleepLogs: importedSleep,
+          heartRateLogs: importedHr,
+          waterLogs: importedWater,
+          mealLogs: importedMeals,
+          savedFoods: importedSavedFoods.length > 0 ? importedSavedFoods : data.savedFoods,
+          workoutLogs: importedWorkouts,
+          habits: importedHabits,
+          dailyPriorities: importedPriorities,
+          journalEntries: importedJournal,
+          bodyLogs: importedBodyLogs,
+        };
+
+        setData(nextState);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+        } catch (e) {
+          console.error('Failed to sync replaced backup to local storage', e);
+        }
+
+        return {
+          success: true,
+          message: `Successfully restored backup. Loaded ${totalImportableLogs} genuine records in Replace mode.`,
+          importedCount: totalImportableLogs,
+          replaced: true,
+        };
+      }
+
+      // Default: Non-destructive Merge Operation
+      // Uses deterministic ID merging so existing local records are preserved without duplication
+      const mergeList = <T extends { id: string; timestamp?: number; updatedAt?: number }>(
+        current: T[],
+        incoming: T[]
+      ): T[] => {
+        const map = new Map<string, T>();
+        // Add existing current records first
+        for (const item of current) {
+          if (item && item.id) map.set(item.id, item);
+        }
+        // Merge incoming records: prefer newer edit if timestamp available, else preserve existing
+        for (const item of incoming) {
+          if (!item || !item.id) continue;
+          const existing = map.get(item.id);
+          if (!existing) {
+            map.set(item.id, item);
+          } else {
+            const inTime = item.updatedAt || item.timestamp || 0;
+            const exTime = existing.updatedAt || existing.timestamp || 0;
+            if (inTime > exTime) {
+              map.set(item.id, item);
+            }
+          }
+        }
+        return Array.from(map.values());
+      };
+
+      const mergedState: LifeOSData = {
+        version: Math.max(data.version || 1, parsed.version || 1),
+        isDemoMode: false, // Imported user data operates in real mode
+        profile: {
+          ...data.profile,
+          ...parsed.profile,
+        },
+        goals: {
+          ...data.goals,
+          ...parsed.goals,
+        },
+        stepLogs: mergeList<StepLog>(data.stepLogs, importedSteps),
+        sleepLogs: mergeList<SleepLog>(data.sleepLogs, importedSleep),
+        heartRateLogs: mergeList<HeartRateLog>(data.heartRateLogs, importedHr),
+        waterLogs: mergeList<WaterLog>(data.waterLogs, importedWater),
+        mealLogs: mergeList<MealLog>(data.mealLogs, importedMeals),
+        savedFoods: mergeList<FoodItem>(data.savedFoods, importedSavedFoods),
+        workoutLogs: mergeList<WorkoutLog>(data.workoutLogs, importedWorkouts),
+        habits: mergeList<Habit>(data.habits, importedHabits),
+        dailyPriorities: mergeList<DailyPriority>(data.dailyPriorities, importedPriorities),
+        journalEntries: mergeList<JournalEntry>(data.journalEntries, importedJournal),
+        bodyLogs: mergeList<BodyMeasurementLog>(data.bodyLogs, importedBodyLogs),
+      };
+
+      setData(mergedState);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedState));
+      } catch (e) {
+        console.error('Failed to sync merged backup to local storage', e);
+      }
+
+      return {
+        success: true,
+        message: `Successfully merged backup! Synchronized ${totalImportableLogs} genuine records without losing existing local entries.`,
+        importedCount: totalImportableLogs,
+        replaced: false,
+      };
+    } catch (e: any) {
+      console.error('Safe import encountered an error:', e);
+      return { success: false, message: `Restore failed: ${e?.message || 'Unexpected parsing error'}. Local data was preserved unchanged.` };
     }
   };
 
