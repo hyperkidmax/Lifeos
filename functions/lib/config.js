@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SUPPORTED_COLLECTIONS = exports.adminDb = exports.FIRESTORE_DATABASE_ID = void 0;
+exports.RESET_COLLECTIONS = exports.SUPPORTED_COLLECTIONS = exports.adminDb = exports.FIRESTORE_DATABASE_ID = void 0;
 const app_1 = require("firebase-admin/app");
 const firestore_1 = require("firebase-admin/firestore");
 // Named database ID specifically provisioned for LifeOS in project gen-lang-client-0635319389
@@ -20,5 +20,10 @@ exports.SUPPORTED_COLLECTIONS = [
     'sleepLogs',
     'heartRateLogs',
     'savedFoods',
+];
+exports.RESET_COLLECTIONS = [
+    ...exports.SUPPORTED_COLLECTIONS,
+    'goals',
+    'cloudBackup',
 ];
 //# sourceMappingURL=config.js.map

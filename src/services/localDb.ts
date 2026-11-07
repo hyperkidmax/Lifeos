@@ -13,7 +13,7 @@ export interface QuarantinedDataset {
 }
 
 class LocalDatabaseService {
-  private dbPromise: Promise<IDBDatabase> | null = null;
+  private dbPromise: Promise<IDBDatabase | null> | null = null;
 
   private isIndexedDBAvailable(): boolean {
     return typeof window !== 'undefined' && typeof window.indexedDB !== 'undefined';
@@ -23,39 +23,44 @@ class LocalDatabaseService {
     if (!this.isIndexedDBAvailable()) return null;
     if (this.dbPromise) return this.dbPromise;
 
-    this.dbPromise = new Promise((resolve, reject) => {
-      const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+    this.dbPromise = new Promise((resolve) => {
+      try {
+        const request = window.indexedDB.open(DB_NAME, DB_VERSION);
 
-      request.onupgradeneeded = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains('wellness_data')) {
-          db.createObjectStore('wellness_data', { keyPath: 'userId' });
-        }
-        if (!db.objectStoreNames.contains('tombstones')) {
-          const store = db.createObjectStore('tombstones', { keyPath: 'docKey' });
-          store.createIndex('userId', 'userId', { unique: false });
-          store.createIndex('id', 'id', { unique: false });
-        }
-        if (!db.objectStoreNames.contains('pending_deletions')) {
-          const store = db.createObjectStore('pending_deletions', { keyPath: 'docKey' });
-          store.createIndex('userId', 'userId', { unique: false });
-        }
-        if (!db.objectStoreNames.contains('quarantine')) {
-          db.createObjectStore('quarantine', { keyPath: 'quarantineId' });
-        }
-      };
+        request.onupgradeneeded = (event) => {
+          const db = (event.target as IDBOpenDBRequest).result;
+          if (!db.objectStoreNames.contains('wellness_data')) {
+            db.createObjectStore('wellness_data', { keyPath: 'userId' });
+          }
+          if (!db.objectStoreNames.contains('tombstones')) {
+            const store = db.createObjectStore('tombstones', { keyPath: 'docKey' });
+            store.createIndex('userId', 'userId', { unique: false });
+            store.createIndex('id', 'id', { unique: false });
+          }
+          if (!db.objectStoreNames.contains('pending_deletions')) {
+            const store = db.createObjectStore('pending_deletions', { keyPath: 'docKey' });
+            store.createIndex('userId', 'userId', { unique: false });
+          }
+          if (!db.objectStoreNames.contains('quarantine')) {
+            db.createObjectStore('quarantine', { keyPath: 'quarantineId' });
+          }
+        };
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => {
-        console.warn('IndexedDB failed to open, falling back to localStorage:', request.error);
-        resolve(null as any);
-      };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => {
+          console.warn('IndexedDB failed to open, using localStorage fallback:', request.error);
+          resolve(null);
+        };
+      } catch (e) {
+        console.warn('IndexedDB initialization error:', e);
+        resolve(null);
+      }
     });
 
     return this.dbPromise;
   }
 
-  private getFallbackKey(userId: string, suffix: string): string {
+  public getFallbackKey(userId: string, suffix: string): string {
     return `lifeos_${userId || 'anonymous'}_${suffix}`;
   }
 
@@ -101,7 +106,7 @@ class LocalDatabaseService {
     return defaultState;
   }
 
-  // 2. Save User Data
+  // 2. Save User Data (Awaits transaction completion)
   public async saveUserData(userId: string, data: LifeOSData): Promise<void> {
     const key = this.getFallbackKey(userId, 'data');
     try {
@@ -112,17 +117,21 @@ class LocalDatabaseService {
 
     const db = await this.getDb();
     if (db) {
-      try {
-        const tx = db.transaction('wellness_data', 'readwrite');
-        const store = tx.objectStore('wellness_data');
-        store.put({ userId, data, updatedAt: Date.now() });
-      } catch (e) {
-        console.warn('IndexedDB write failed:', e);
-      }
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const tx = db.transaction('wellness_data', 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('IndexedDB save failed'));
+          tx.onabort = () => reject(tx.error || new Error('IndexedDB save aborted'));
+          tx.objectStore('wellness_data').put({ userId, data, updatedAt: Date.now() });
+        } catch (err) {
+          reject(err);
+        }
+      });
     }
   }
 
-  // 3. Atomically Remove Record and Persist Tombstone (Crash-Resilient)
+  // 3. Atomically Remove Record and Persist Tombstone in a single transaction
   public async atomicallyRemoveRecordAndQueueTombstone(
     userId: string,
     collection: string,
@@ -141,7 +150,7 @@ class LocalDatabaseService {
 
     const docKey = `${userId}__${collection}__${recordId}`;
 
-    // Filter record from target array in local state
+    // Filter record from target collection in local working state
     const updatedCollection = ((currentData as any)[collection] || []).filter(
       (item: any) => item.id !== recordId
     );
@@ -156,26 +165,42 @@ class LocalDatabaseService {
       pendingTombstones: updatedPending,
     };
 
-    // 1. Commit to localStorage synchronously
-    const dataKey = this.getFallbackKey(userId, 'data');
-    const tombstoneKey = this.getFallbackKey(userId, 'pending_tombstones');
-    try {
-      localStorage.setItem(dataKey, JSON.stringify(updatedData));
-      localStorage.setItem(tombstoneKey, JSON.stringify(updatedPending));
-    } catch (e) {
-      console.error('Failed to sync atomic deletion to localStorage:', e);
-    }
-
-    // 2. Commit transaction in IndexedDB
     const db = await this.getDb();
     if (db) {
+      // Execute in ONE single atomic readwrite transaction across all stores
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const tx = db.transaction(['wellness_data', 'tombstones', 'pending_deletions'], 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+
+          tx.objectStore('wellness_data').put({ userId, data: updatedData, updatedAt: Date.now() });
+          tx.objectStore('tombstones').put({ docKey, userId, ...tombstone });
+          tx.objectStore('pending_deletions').put({ docKey, userId, ...tombstone });
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      // Synchronize to localStorage for offline redundancy
+      const dataKey = this.getFallbackKey(userId, 'data');
+      const tombstoneKey = this.getFallbackKey(userId, 'pending_tombstones');
       try {
-        const tx = db.transaction(['wellness_data', 'tombstones', 'pending_deletions'], 'readwrite');
-        tx.objectStore('wellness_data').put({ userId, data: updatedData, updatedAt: Date.now() });
-        tx.objectStore('tombstones').put({ docKey, userId, ...tombstone });
-        tx.objectStore('pending_deletions').put({ docKey, userId, ...tombstone });
+        localStorage.setItem(dataKey, JSON.stringify(updatedData));
+        localStorage.setItem(tombstoneKey, JSON.stringify(updatedPending));
       } catch (e) {
-        console.warn('IndexedDB atomic transaction warning:', e);
+        console.warn('LocalStorage backup sync warning:', e);
+      }
+    } else {
+      // Fallback path when IndexedDB is completely unavailable
+      const dataKey = this.getFallbackKey(userId, 'data');
+      const tombstoneKey = this.getFallbackKey(userId, 'pending_tombstones');
+      try {
+        localStorage.setItem(dataKey, JSON.stringify(updatedData));
+        localStorage.setItem(tombstoneKey, JSON.stringify(updatedPending));
+      } catch (e: any) {
+        throw new Error(`Storage failure: could not persist deletion to localStorage: ${e.message || String(e)}`);
       }
     }
 
@@ -185,6 +210,21 @@ class LocalDatabaseService {
   // 4. Mark Pending Tombstone as Synced
   public async markTombstoneSynced(userId: string, collection: string, recordId: string): Promise<void> {
     const docKey = `${userId}__${collection}__${recordId}`;
+
+    const db = await this.getDb();
+    if (db) {
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const tx = db.transaction('pending_deletions', 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('IndexedDB delete pending tombstone failed'));
+          tx.onabort = () => reject(tx.error || new Error('IndexedDB delete pending tombstone aborted'));
+          tx.objectStore('pending_deletions').delete(docKey);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
 
     const tombstoneKey = this.getFallbackKey(userId, 'pending_tombstones');
     try {
@@ -197,20 +237,36 @@ class LocalDatabaseService {
     } catch (e) {
       console.warn('Failed to update pending tombstones in localStorage:', e);
     }
-
-    const db = await this.getDb();
-    if (db) {
-      try {
-        const tx = db.transaction('pending_deletions', 'readwrite');
-        tx.objectStore('pending_deletions').delete(docKey);
-      } catch (e) {
-        console.warn('Failed to delete pending tombstone in IndexedDB:', e);
-      }
-    }
   }
 
   // 5. Get All Pending Tombstones
   public async getPendingTombstones(userId: string): Promise<RecordTombstone[]> {
+    const db = await this.getDb();
+    if (db) {
+      try {
+        const tx = db.transaction('pending_deletions', 'readonly');
+        const store = tx.objectStore('pending_deletions');
+        const index = store.index('userId');
+        const req = index.getAll(userId);
+        const results = await new Promise<any[]>((resolve, reject) => {
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+        if (results && results.length > 0) {
+          return results.map((r) => ({
+            id: r.id,
+            collection: r.collection,
+            deletedAt: r.deletedAt,
+            deletedByUid: r.deletedByUid,
+            generation: r.generation,
+            tombstoneVersion: r.tombstoneVersion || 1,
+          }));
+        }
+      } catch (e) {
+        console.warn('IndexedDB pending tombstones read failed, trying localStorage:', e);
+      }
+    }
+
     const tombstoneKey = this.getFallbackKey(userId, 'pending_tombstones');
     try {
       const raw = localStorage.getItem(tombstoneKey);
@@ -268,6 +324,11 @@ class LocalDatabaseService {
       try {
         const tx = db.transaction('quarantine', 'readwrite');
         tx.objectStore('quarantine').put(record);
+        await new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        });
       } catch (e) {
         console.warn('Failed to store quarantine in IndexedDB:', e);
       }

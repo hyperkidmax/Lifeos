@@ -172,21 +172,42 @@ export async function deleteRecordViaCloudFunction(
   }
 }
 
-// 2. Batch register tombstones via Cloud Function
+// 2. Batch register tombstones via Cloud Function (chunked to max 200 items per call)
 export async function batchRecordTombstonesViaCloudFunction(
   items: Array<{ collection: string; id: string; deletedAt?: number }>
-): Promise<{ success: boolean; registeredCount?: number; error?: string }> {
-  if (!items || items.length === 0) return { success: true, registeredCount: 0 };
+): Promise<{ success: boolean; registeredCount?: number; alreadyExistedCount?: number; error?: string }> {
+  if (!items || items.length === 0) return { success: true, registeredCount: 0, alreadyExistedCount: 0 };
+  const CHUNK_SIZE = 200;
+  let totalRegistered = 0;
+  let totalAlreadyExisted = 0;
+
   try {
     const batchFn = httpsCallable<{ items: any[] }, any>(
       functions,
       'batchRecordTombstones'
     );
-    const result = await batchFn({ items });
-    return { success: true, registeredCount: result.data.registeredCount };
+
+    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+      const chunk = items.slice(i, i + CHUNK_SIZE);
+      const result = await batchFn({ items: chunk });
+      if (result.data) {
+        totalRegistered += result.data.registeredCount || 0;
+        totalAlreadyExisted += result.data.alreadyExistedCount || 0;
+      }
+    }
+    return {
+      success: true,
+      registeredCount: totalRegistered,
+      alreadyExistedCount: totalAlreadyExisted,
+    };
   } catch (error: any) {
     console.warn(`Cloud Function batchRecordTombstones failed or offline:`, error);
-    return { success: false, error: error.message || String(error) };
+    return {
+      success: false,
+      error: error.message || String(error),
+      registeredCount: totalRegistered,
+      alreadyExistedCount: totalAlreadyExisted,
+    };
   }
 }
 
@@ -1154,11 +1175,13 @@ export async function syncAndMergeWithCloud(
   const pendingTombstones = cleanLocalData.pendingTombstones || [];
   if (pendingTombstones.length > 0) {
     try {
-      await batchRecordTombstonesViaCloudFunction(
+      const res = await batchRecordTombstonesViaCloudFunction(
         pendingTombstones.map((t) => ({ collection: t.collection, id: t.id, deletedAt: t.deletedAt }))
       );
-      for (const t of pendingTombstones) {
-        await localDb.markTombstoneSynced(userId, t.collection, t.id);
+      if (res.success) {
+        for (const t of pendingTombstones) {
+          await localDb.markTombstoneSynced(userId, t.collection, t.id);
+        }
       }
     } catch (e) {
       console.warn('Pending tombstones flush queued for next sync:', e);

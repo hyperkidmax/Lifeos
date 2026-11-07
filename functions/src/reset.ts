@@ -1,6 +1,6 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { FieldValue } from 'firebase-admin/firestore';
-import { adminDb, SUPPORTED_COLLECTIONS } from './config';
+import { adminDb, RESET_COLLECTIONS } from './config.js';
 
 // 1. Get current generation or initialize baseline Generation 1
 export const getSyncGeneration = onCall({ region: 'asia-northeast1' }, async (request) => {
@@ -18,13 +18,14 @@ export const getSyncGeneration = onCall({ region: 'asia-northeast1' }, async (re
       currentGeneration: 1,
       generationEstablishedAt: FieldValue.serverTimestamp(),
       activeResetId: null,
+      resetStatus: 'idle',
       minimumValidTimestamp: 0,
     };
     await syncRef.set(initialMeta);
     return {
       currentGeneration: 1,
       activeResetId: null,
-      status: 'active',
+      resetStatus: 'idle',
     };
   }
 
@@ -39,7 +40,7 @@ export const getSyncGeneration = onCall({ region: 'asia-northeast1' }, async (re
   };
 });
 
-// 2. Start Global Reset (Increments Generation, locks writes)
+// 2. Start Global Reset (Increments Generation, locks writes, initializes checkpoint)
 export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (request) => {
   const uid = request.auth?.uid;
   if (!uid) {
@@ -50,7 +51,7 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
   const syncRef = adminDb.doc(`users/${uid}/meta/sync`);
   const resetRef = adminDb.doc(`users/${uid}/meta/reset`);
 
-  // Transactionally advance generation and set reset marker
+  // Transactionally advance generation and lock client writes
   const newGeneration = await adminDb.runTransaction(async (tx) => {
     const syncDoc = await tx.get(syncRef);
     const currentGen = syncDoc.exists ? (syncDoc.data()?.currentGeneration || 1) : 1;
@@ -63,6 +64,7 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
         currentGeneration: nextGen,
         generationEstablishedAt: FieldValue.serverTimestamp(),
         activeResetId: resetId,
+        resetStatus: 'in_progress',
         minimumValidTimestamp: Date.now(),
       },
       { merge: true }
@@ -77,6 +79,7 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
       targetGeneration: nextGen,
       currentCollectionIndex: 0,
       deletedCount: 0,
+      leaseUntil: 0,
     });
 
     return nextGen;
@@ -90,7 +93,7 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
   };
 });
 
-// 3. Execute Reset Chunk (Synchronous batch within function execution window)
+// 3. Execute Reset Chunk: Transactional lease locking, checkpointing, preserving tombstones
 export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (request) => {
   const uid = request.auth?.uid;
   if (!uid) {
@@ -98,64 +101,108 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
   }
 
   const resetRef = adminDb.doc(`users/${uid}/meta/reset`);
-  const resetSnap = await resetRef.get();
-  if (!resetSnap.exists || resetSnap.data()?.status !== 'in_progress') {
-    throw new HttpsError('failed-precondition', 'No active reset in progress');
+
+  // Transactionally acquire a 30-second execution lease to prevent race conditions from concurrent chunk requests
+  const now = Date.now();
+  let resetData: FirebaseFirestore.DocumentData;
+
+  try {
+    resetData = await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(resetRef);
+      if (!snap.exists || snap.data()?.status !== 'in_progress') {
+        throw new HttpsError('failed-precondition', 'No active reset in progress');
+      }
+
+      const d = snap.data()!;
+      if (d.leaseUntil && d.leaseUntil > now) {
+        throw new HttpsError(
+          'failed-precondition',
+          'Another reset chunk is currently executing; please retry shortly'
+        );
+      }
+
+      tx.update(resetRef, {
+        leaseUntil: now + 30000,
+        lastLeaseAcquiredAt: FieldValue.serverTimestamp(),
+      });
+
+      return d;
+    });
+  } catch (err: any) {
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError('internal', err.message || 'Failed to acquire reset lock');
   }
 
-  const resetData = resetSnap.data()!;
-  const collectionsToWipe = [...SUPPORTED_COLLECTIONS, 'cloudBackup', 'tombstones'];
+  // Collections to wipe includes all log collections, goals, and cloudBackup.
+  // CRITICAL: tombstones are strictly EXCLUDED so permanent protection against stale devices remains active.
+  const collectionsToWipe = RESET_COLLECTIONS;
   let colIndex = resetData.currentCollectionIndex || 0;
   let chunkDeleted = 0;
   const CHUNK_LIMIT = 400;
 
-  while (colIndex < collectionsToWipe.length && chunkDeleted < CHUNK_LIMIT) {
-    const colName = collectionsToWipe[colIndex];
-    const remainingBudget = CHUNK_LIMIT - chunkDeleted;
+  try {
+    while (colIndex < collectionsToWipe.length && chunkDeleted < CHUNK_LIMIT) {
+      const colName = collectionsToWipe[colIndex];
+      const remainingBudget = CHUNK_LIMIT - chunkDeleted;
 
-    const querySnap = await adminDb
-      .collection(`users/${uid}/${colName}`)
-      .limit(remainingBudget)
-      .get();
+      const querySnap = await adminDb
+        .collection(`users/${uid}/${colName}`)
+        .limit(remainingBudget)
+        .get();
 
-    if (querySnap.empty) {
-      colIndex++;
-      continue;
+      if (querySnap.empty) {
+        // Also wipe standalone cloudBackup/latest document if inspecting cloudBackup
+        if (colName === 'cloudBackup') {
+          try {
+            await adminDb.doc(`users/${uid}/cloudBackup/latest`).delete();
+          } catch {
+            // Ignore if missing
+          }
+        }
+        colIndex++;
+        continue;
+      }
+
+      const batch = adminDb.batch();
+      querySnap.docs.forEach((docSnap) => {
+        batch.delete(docSnap.ref);
+      });
+
+      await batch.commit();
+      chunkDeleted += querySnap.size;
+
+      if (querySnap.size < remainingBudget) {
+        colIndex++;
+      }
     }
 
-    const batch = adminDb.batch();
-    querySnap.docs.forEach((docSnap) => {
-      batch.delete(docSnap.ref);
+    const isFinished = colIndex >= collectionsToWipe.length;
+    const totalDeleted = (resetData.deletedCount || 0) + chunkDeleted;
+
+    // Release lease and commit new checkpoint
+    await resetRef.update({
+      currentCollectionIndex: colIndex,
+      deletedCount: totalDeleted,
+      leaseUntil: 0,
+      lastChunkProcessedAt: FieldValue.serverTimestamp(),
     });
 
-    await batch.commit();
-    chunkDeleted += querySnap.size;
-
-    if (querySnap.size < remainingBudget) {
-      colIndex++;
-    }
+    return {
+      success: true,
+      chunkDeleted,
+      totalDeleted,
+      currentCollectionIndex: colIndex,
+      isFinished,
+      status: isFinished ? 'verifying' : 'in_progress',
+    };
+  } catch (err: any) {
+    // Release lease on error so subsequent attempts are not blocked
+    await resetRef.update({ leaseUntil: 0 }).catch(() => {});
+    throw new HttpsError('internal', err.message || 'Reset chunk processing failed');
   }
-
-  const isFinished = colIndex >= collectionsToWipe.length;
-  const totalDeleted = (resetData.deletedCount || 0) + chunkDeleted;
-
-  await resetRef.update({
-    currentCollectionIndex: colIndex,
-    deletedCount: totalDeleted,
-    lastChunkProcessedAt: FieldValue.serverTimestamp(),
-  });
-
-  return {
-    success: true,
-    chunkDeleted,
-    totalDeleted,
-    currentCollectionIndex: colIndex,
-    isFinished,
-    status: isFinished ? 'verifying' : 'in_progress',
-  };
 });
 
-// 4. Verify and Finalize Reset
+// 4. Verify and Finalize Reset: Must verify all target collections are empty before completion
 export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, async (request) => {
   const uid = request.auth?.uid;
   if (!uid) {
@@ -169,7 +216,7 @@ export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, asyn
   }
 
   const resetData = resetSnap.data()!;
-  const collectionsToCheck = [...SUPPORTED_COLLECTIONS, 'cloudBackup', 'tombstones'];
+  const collectionsToCheck = RESET_COLLECTIONS;
   let totalRemaining = 0;
 
   for (const colName of collectionsToCheck) {
@@ -186,7 +233,7 @@ export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, asyn
     };
   }
 
-  // Clear cloudBackup/latest explicitly if it was a standalone document
+  // Clear standalone cloudBackup/latest document explicitly
   try {
     await adminDb.doc(`users/${uid}/cloudBackup/latest`).delete();
   } catch {
@@ -198,11 +245,13 @@ export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, asyn
     status: 'completed',
     completedAt: FieldValue.serverTimestamp(),
     verifiedZeroRemaining: true,
+    leaseUntil: 0,
   });
 
   const syncRef = adminDb.doc(`users/${uid}/meta/sync`);
   await syncRef.update({
     activeResetId: null,
+    resetStatus: 'idle',
   });
 
   return {

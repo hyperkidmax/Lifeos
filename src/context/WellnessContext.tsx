@@ -632,28 +632,42 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   // Central durable deletion handler: Atomic local commit + Cloud Function execution
-  const executeDurableDeletion = (collection: string, id: string) => {
+  const executeDurableDeletion = async (collection: string, id: string): Promise<boolean> => {
     const currentGen = dataRef.current.generation || 1;
     const uid = currentUser?.uid || 'anonymous';
 
-    // 1. Transactionally remove from local state & queue tombstone
-    localDb
-      .atomicallyRemoveRecordAndQueueTombstone(uid, collection, id, currentGen, dataRef.current)
-      .then(({ updatedData }) => {
-        setData(updatedData);
-      });
+    try {
+      // 1. Transactionally remove from local state & queue tombstone; await complete IndexedDB commit
+      const { updatedData } = await localDb.atomicallyRemoveRecordAndQueueTombstone(
+        uid,
+        collection,
+        id,
+        currentGen,
+        dataRef.current
+      );
+      setData(updatedData);
 
-    // 2. Asynchronously commit deletion and tombstone to Cloud Functions if authenticated & online
-    if (currentUser && navigator.onLine) {
-      deleteRecordViaCloudFunction(collection, id)
-        .then((res) => {
-          if (res.success) {
-            localDb.markTombstoneSynced(currentUser.uid, collection, id);
-          }
-        })
-        .catch((err) => {
-          console.warn('Cloud Function deletion failed; queued for background sync:', err);
-        });
+      // 2. Commit deletion and tombstone to Cloud Functions if authenticated & online
+      if (currentUser && navigator.onLine) {
+        deleteRecordViaCloudFunction(collection, id)
+          .then((res) => {
+            if (res.success) {
+              localDb.markTombstoneSynced(currentUser.uid, collection, id);
+            }
+          })
+          .catch((err) => {
+            console.warn('Cloud Function deletion failed; queued for background sync:', err);
+          });
+      }
+      return true;
+    } catch (err: any) {
+      console.error('Failed to commit durable deletion to local storage:', err);
+      setSyncToast({
+        message: 'Storage error: failed to delete record locally.',
+        type: 'error',
+        timestamp: Date.now(),
+      });
+      return false;
     }
   };
 

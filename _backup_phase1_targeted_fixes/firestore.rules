@@ -1,0 +1,296 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all for Zero-Trust baseline
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Authentication and Identity Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidTombstoneId(id) {
+      return id is string && id.size() > 0 && id.size() <= 260 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Server-Controlled Generation Authority Check
+    // Rules Access Limit Note: All document writes in a batch evaluate the exact same path
+    // (/users/{userId}/meta/sync). Firestore caches this single document lookup, consuming
+    // exactly 1 access call out of the 20-call aggregate batch ceiling.
+    function getSyncMeta(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)/meta/sync).data;
+    }
+
+    function isValidWriteGeneration(userId, data) {
+      let syncMeta = getSyncMeta(userId);
+      return syncMeta != null &&
+             syncMeta.currentGeneration is int &&
+             data.keys().hasAll(['_gen']) &&
+             data._gen is int &&
+             data._gen == syncMeta.currentGeneration;
+    }
+
+    // Entity Blueprints
+    function isValidUserProfile(data, userId) {
+      return data.userId == userId &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100;
+    }
+
+    function isValidUserGoals(data, userId) {
+      return data.userId == userId &&
+             data.keys().hasAll(['userId', 'dailySteps', 'dailyWaterMl']) &&
+             data.dailySteps is number && data.dailySteps >= 0 && data.dailySteps <= 200000 &&
+             data.dailyWaterMl is number && data.dailyWaterMl >= 0 && data.dailyWaterMl <= 20000;
+    }
+
+    function isValidCloudBackup(data, userId) {
+      return data.userId == userId &&
+             data.keys().hasAll(['userId', 'backupData', 'lastSyncedAt']) &&
+             data.backupData is string && data.backupData.size() <= 1048576 &&
+             data.lastSyncedAt is number;
+    }
+
+    function isValidWaterLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.amountMl is number && data.amountMl > 0 && data.amountMl <= 10000 &&
+             data.timestamp is number;
+    }
+
+    function isValidMealLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+             data.calories is number && data.calories >= 0 && data.calories <= 20000 &&
+             data.timestamp is number;
+    }
+
+    function isValidWorkoutLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 150 &&
+             data.durationMinutes is number && data.durationMinutes >= 0 && data.durationMinutes <= 1440 &&
+             data.timestamp is number;
+    }
+
+    function isValidJournalEntry(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.mood is number && data.mood >= 1 && data.mood <= 5 &&
+             data.energy is number && data.energy >= 1 && data.energy <= 5 &&
+             data.reflection is string && data.reflection.size() <= 5000 &&
+             data.timestamp is number;
+    }
+
+    function isValidBodyLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.weightKg is number && data.weightKg > 0 && data.weightKg <= 500 &&
+             data.timestamp is number;
+    }
+
+    function isValidHabit(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 100 &&
+             data.targetDaysPerWeek is number && data.targetDaysPerWeek >= 1 && data.targetDaysPerWeek <= 7;
+    }
+
+    function isValidDailyPriority(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.text is string && data.text.size() > 0 && data.text.size() <= 200 &&
+             data.completed is bool &&
+             data.order is number;
+    }
+
+    function isValidStepLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.count is number && data.count >= 0 && data.count <= 250000 &&
+             data.timestamp is number;
+    }
+
+    function isValidSleepLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             data.totalMinutes is number && data.totalMinutes >= 0 && data.totalMinutes <= 1440 &&
+             data.timestamp is number;
+    }
+
+    function isValidHeartRateLog(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() == 10 &&
+             (!data.keys().hasAny(['restingBpm']) || (data.restingBpm is number && data.restingBpm >= 30 && data.restingBpm <= 250)) &&
+             (!data.keys().hasAny(['avgBpm']) || (data.avgBpm is number && data.avgBpm >= 30 && data.avgBpm <= 250)) &&
+             data.timestamp is number;
+    }
+
+    function isValidSavedFood(data, userId) {
+      return data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+             data.calories is number && data.calories >= 0 && data.calories <= 20000;
+    }
+
+    // User Root Document
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow create, update: if isValidId(userId) && isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      // User root deletion reserved for complete account closure
+      allow delete: if false;
+
+      // System Metadata: READABLE BY OWNER, WRITABLE ONLY BY ADMIN SDK
+      match /meta/sync {
+        allow get: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      match /meta/reset {
+        allow get: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      // Permanent Tombstone Registry: READABLE BY OWNER, WRITABLE ONLY BY ADMIN SDK
+      match /tombstones/{tombstoneId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      // Goals Subcollection
+      match /goals/{goalId} {
+        allow get: if isValidId(userId) && isValidId(goalId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(goalId) && isOwner(userId) &&
+                                 isValidUserGoals(request.resource.data, userId);
+        allow delete: if false;
+      }
+
+      // Cloud Backup Bundle
+      match /cloudBackup/{backupId} {
+        allow get: if isValidId(userId) && isValidId(backupId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(backupId) && isOwner(userId) &&
+                                 isValidCloudBackup(request.resource.data, userId);
+        allow delete: if false;
+      }
+
+      // 1. Water Logs
+      match /waterLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidWaterLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 2. Meal Logs
+      match /mealLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidMealLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 3. Workout Logs
+      match /workoutLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidWorkoutLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 4. Journal Entries
+      match /journalEntries/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidJournalEntry(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 5. Body Measurement Logs
+      match /bodyLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidBodyLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 6. Habits
+      match /habits/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidHabit(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 7. Daily Priorities
+      match /dailyPriorities/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidDailyPriority(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 8. Step Logs
+      match /stepLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidStepLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 9. Sleep Logs
+      match /sleepLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidSleepLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 10. Heart Rate Logs
+      match /heartRateLogs/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidHeartRateLog(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+
+      // 11. Saved Foods
+      match /savedFoods/{id} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create, update: if isValidId(userId) && isValidId(id) && isOwner(userId) &&
+                                 isValidSavedFood(request.resource.data, userId) &&
+                                 isValidWriteGeneration(userId, request.resource.data);
+        allow delete: if false;
+      }
+    }
+  }
+}

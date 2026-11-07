@@ -24,3 +24,10 @@ export const SUPPORTED_COLLECTIONS = [
 ] as const;
 
 export type SupportedCollection = (typeof SUPPORTED_COLLECTIONS)[number];
+
+export const RESET_COLLECTIONS = [
+  ...SUPPORTED_COLLECTIONS,
+  'goals',
+  'cloudBackup',
+] as const;
+
