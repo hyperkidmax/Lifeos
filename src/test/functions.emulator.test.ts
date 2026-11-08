@@ -32,6 +32,10 @@ import {
   connectAuthEmulator,
   signInWithEmailAndPassword,
 } from 'firebase/auth';
+import { initializeApp as initAdminApp, getApps as getAdminApps, deleteApp as deleteAdminApp } from 'firebase-admin/app';
+import { getAuth as getAdminAuth } from 'firebase-admin/auth';
+import { getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
+import { commitResetCheckpointTx } from '../../functions/src/reset.js';
 
 export interface FunctionTestResult {
   testNumber: number;
@@ -47,75 +51,50 @@ const TEST_USER_PASSWORD = 'TestPassword123!';
 
 /**
  * Creates a real authenticated user session against the Firebase Auth Emulator
- * using the official Auth Emulator mechanisms.
+ * using Firebase Admin Auth connected explicitly to the Auth Emulator.
  * 
- * Supports:
- * 1. Admin/Emulator accounts:signInWithCustomToken or accounts:signUp followed by account update/sign-in.
- * 2. In the Firebase Auth Emulator, sending a signed fake JWT custom token or creating an account
- *    with explicit localId via accounts:signUp.
- * 3. We create or update the user via the Auth Emulator REST API, then sign in with the SDK.
- * 4. Strictly asserts that auth.currentUser.uid === expectedUid. Never swallows errors.
+ * Flow:
+ * 1. Admin Auth creates or updates the user with the exact requested `uid`, `email`, and `password`.
+ * 2. Client SDK signs in via `signInWithEmailAndPassword(clientAuth, email, password)`.
+ * 3. Strictly asserts `auth.currentUser.uid === uid`.
+ * 4. Never swallows authentication errors.
  */
 async function createAndSignInEmulatorUser(
-  auth: any,
-  host: string,
-  authPort: number,
+  clientAuth: any,
+  adminAuth: any,
   uid: string,
   email: string
 ): Promise<void> {
-  // 1. In Firebase Auth Emulator, we can reliably create an account or verify existence via accounts:signUp
-  const signUpUrl = `http://${host}:${authPort}/identitytoolkit.googleapis.com/v1/accounts:signUp?key=fake-emulator-api-key`;
-  const signUpRes = await fetch(signUpUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  // 1. Create user with requested UID using Admin Auth connected to the Auth Emulator
+  try {
+    await adminAuth.createUser({
+      uid,
       email,
       password: TEST_USER_PASSWORD,
-      localId: uid,
-      returnSecureToken: true,
-    }),
-  });
-
-  let idToken: string | null = null;
-  if (signUpRes.ok) {
-    const data = await signUpRes.json();
-    idToken = data.idToken || null;
-  } else {
-    const errorBody = await signUpRes.text();
-    if (errorBody.includes('EMAIL_EXISTS')) {
-      // User exists, sign in to retrieve token
-      const signInUrl = `http://${host}:${authPort}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-emulator-api-key`;
-      const signInRes = await fetch(signInUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email,
-          password: TEST_USER_PASSWORD,
-          returnSecureToken: true,
-        }),
+    });
+  } catch (createErr: any) {
+    if (createErr.code === 'auth/uid-already-exists' || createErr.code === 'auth/email-already-exists') {
+      // User already exists in this emulator run: ensure password & email match
+      await adminAuth.updateUser(uid, {
+        email,
+        password: TEST_USER_PASSWORD,
       });
-      if (!signInRes.ok) {
-        const signErr = await signInRes.text();
-        throw new Error(`Failed to sign in existing emulator user ${uid}: ${signErr}`);
-      }
-      const data = await signInRes.json();
-      idToken = data.idToken || null;
     } else {
-      throw new Error(`Auth emulator account creation failed for ${uid}: ${errorBody}`);
+      throw new Error(`Admin Auth createUser failed for ${uid}: ${createErr.message || createErr}`);
     }
   }
 
-  // 2. Perform SDK sign-in using email and password against the Auth Emulator
-  const userCredential = await signInWithEmailAndPassword(auth, email, TEST_USER_PASSWORD);
+  // 2. Perform client SDK sign-in with email and password against the Auth Emulator
+  const userCredential = await signInWithEmailAndPassword(clientAuth, email, TEST_USER_PASSWORD);
   if (!userCredential || !userCredential.user) {
-    throw new Error(`Failed to obtain UserCredential for ${uid}`);
+    throw new Error(`Failed to obtain client UserCredential for ${uid}`);
   }
 
   // 3. Strictly verify that auth.currentUser.uid matches the requested UID
-  const actualUid: string | undefined = auth.currentUser?.uid;
+  const actualUid: string | undefined = clientAuth.currentUser?.uid;
   if (!actualUid || actualUid !== uid) {
     throw new Error(
-      `Auth emulator UID mismatch: requested "${uid}", but auth.currentUser.uid is "${actualUid || 'null'}"`
+      `Auth emulator UID mismatch: requested "${uid}", but clientAuth.currentUser.uid is "${actualUid || 'null'}"`
     );
   }
 }
@@ -186,6 +165,15 @@ export async function runFunctionsEmulatorTests(options?: {
   connectFirestoreEmulator(testDb, host, firestorePort);
   connectFunctionsEmulator(testFunctions, host, functionsPort);
 
+  // Set emulator host environment variables for Admin SDK
+  process.env.FIREBASE_AUTH_EMULATOR_HOST = `${host}:${authPort}`;
+  process.env.FIRESTORE_EMULATOR_HOST = `${host}:${firestorePort}`;
+
+  const adminAppName = `admin-test-${Date.now()}`;
+  const adminApp = initAdminApp({ projectId }, adminAppName);
+  const adminAuth = getAdminAuth(adminApp);
+  const adminDb = getAdminFirestore(adminApp, databaseId);
+
   try {
     const aliceUid = 'alice_func_test_1';
     const bobUid = 'bob_func_test_2';
@@ -228,8 +216,8 @@ export async function runFunctionsEmulatorTests(options?: {
       addResult(1, 'Unauthenticated callable requests rejected', true, 'Unauthenticated caller threw unauthenticated error');
     }
 
-    // Authenticate Alice with verified UID
-    await createAndSignInEmulatorUser(testAuth, host, authPort, aliceUid, 'alice@test.emulator');
+    // Authenticate Alice with verified UID using Admin Auth + Client SDK
+    await createAndSignInEmulatorUser(testAuth, adminAuth, aliceUid, 'alice@test.emulator');
     if (testAuth.currentUser?.uid !== aliceUid) {
       throw new Error(`Authentication verification failed: currentUser is ${testAuth.currentUser?.uid}`);
     }
@@ -570,19 +558,18 @@ export async function runFunctionsEmulatorTests(options?: {
     // TEST 9: Real Stale-Worker Lease Fencing (Checkpoint Commit Boundary)
     // =========================================================================
     {
-      // Deterministic worker/checkpoint boundary:
-      // 1. Worker A acquires lease token N (e.g. leaseToken = 10, leaseUntil = now + 30000).
-      // 2. Worker A performs work (e.g. prepares to commit checkpoint colIndex: 2, deletedCount: 50).
-      // 3. Worker A's lease expires (or worker B supersedes it after timeout).
-      //    Worker B takes over, acquiring lease token N+1 (leaseToken = 11, leaseUntil = now + 30000).
-      // 4. Stale Worker A attempts to commit its checkpoint using old token N.
-      // 5. The transaction rejects Worker A with fencing token mismatch (aborted error).
-      // 6. Prove Worker A cannot change checkpoint (colIndex), deletedCount, leaseToken, or reset metadata.
+      // Deterministic worker/checkpoint boundary testing the actual production commitResetCheckpointTx function:
+      // 1. Worker A has token N (e.g. tokenA = 10).
+      // 2. Worker B takes over with token N+1 (e.g. tokenB = 11) and an active lease.
+      // 3. Worker A invokes the real production commitResetCheckpointTx() with token N.
+      // 4. The production function rejects the stale token.
+      // 5. Checkpoint, deletedCount, leaseToken, leaseUntil, status and reset metadata remain unchanged.
 
       const tokenA = 10;
       const tokenB = 11;
       const initialColIndex = 1;
       const initialDeletedCount = 20;
+      const activeLeaseExpiry = Date.now() + 30000;
 
       // Establish state where Worker B holds the authoritative active lease
       await setDoc(aliceResetRef, {
@@ -591,44 +578,30 @@ export async function runFunctionsEmulatorTests(options?: {
         currentCollectionIndex: initialColIndex,
         deletedCount: initialDeletedCount,
         leaseToken: tokenB,
-        leaseUntil: Date.now() + 30000, // Active lease held by Worker B
+        leaseUntil: activeLeaseExpiry, // Active lease held by Worker B
         targetGeneration: 2,
         resetId: 'reset_fencing_test',
       }, { merge: true });
 
-      // Simulate Stale Worker A attempting to commit its checkpoint using old token A
+      // Stale Worker A invokes the actual production commitResetCheckpointTx function using stale tokenA
       let staleWorkerRejected = false;
       let rejectionError = '';
 
-      // Direct simulation of the exact transaction commit logic from commitResetCheckpointTx:
       try {
-        // Execute the exact transactional verification run in Cloud Functions
-        const txPromise = (async () => {
-          const docSnap = await getDoc(aliceResetRef);
-          const curData = docSnap.data();
-          if (!curData || curData.leaseToken !== tokenA) {
-            const err: any = new Error(`Reset lease fencing token mismatch (held: ${tokenA}, current: ${curData?.leaseToken}); another worker took over`);
-            err.code = 'aborted';
-            throw err;
-          }
-          // If not fenced, it would update:
-          await setDoc(aliceResetRef, {
-            currentCollectionIndex: 2,
-            deletedCount: 999, // Malicious or stale count
-            leaseToken: tokenA,
-          }, { merge: true });
-        })();
-        await txPromise;
+        await commitResetCheckpointTx(adminDb, aliceUid, tokenA, 2, 999);
       } catch (err: any) {
-        staleWorkerRejected = err.code === 'aborted' || err.message?.includes('fencing token mismatch');
+        staleWorkerRejected =
+          err.code === 'aborted' ||
+          err.message?.includes('fencing token mismatch') ||
+          err.details?.includes('fencing token mismatch');
         rejectionError = err.message || err.code;
       }
 
       if (!staleWorkerRejected) {
-        throw new Error('Test 9 failed: stale worker with token N was not rejected by fencing check');
+        throw new Error('Test 9 failed: production commitResetCheckpointTx did not reject stale token N');
       }
 
-      // Prove the stale worker cannot change the checkpoint, deletedCount, lease state, or reset metadata
+      // Prove the stale worker cannot change checkpoint, deletedCount, lease state, or reset metadata
       const snapAfterStaleAttempt = await getDoc(aliceResetRef);
       const afterData = snapAfterStaleAttempt.data()!;
 
@@ -636,7 +609,9 @@ export async function runFunctionsEmulatorTests(options?: {
         afterData.currentCollectionIndex === initialColIndex &&
         afterData.deletedCount === initialDeletedCount &&
         afterData.leaseToken === tokenB &&
+        afterData.leaseUntil === activeLeaseExpiry &&
         afterData.status === 'in_progress' &&
+        afterData.targetGeneration === 2 &&
         afterData.resetId === 'reset_fencing_test';
 
       if (!checkpointPreserved) {
@@ -644,7 +619,8 @@ export async function runFunctionsEmulatorTests(options?: {
           `Test 9 failed: Stale worker corrupted reset document! ` +
           `colIndex: ${afterData.currentCollectionIndex} (expected ${initialColIndex}), ` +
           `deletedCount: ${afterData.deletedCount} (expected ${initialDeletedCount}), ` +
-          `leaseToken: ${afterData.leaseToken} (expected ${tokenB})`
+          `leaseToken: ${afterData.leaseToken} (expected ${tokenB}), ` +
+          `leaseUntil: ${afterData.leaseUntil} (expected ${activeLeaseExpiry})`
         );
       }
 
@@ -652,7 +628,7 @@ export async function runFunctionsEmulatorTests(options?: {
         9,
         'Deterministic stale-worker lease fencing protects checkpoints',
         true,
-        `Stale worker (token ${tokenA}) rejected by lease fencing (${rejectionError}); Worker B token ${tokenB} and checkpoint intact`
+        `Production commitResetCheckpointTx rejected stale token ${tokenA} (${rejectionError}); Worker B token ${tokenB} and checkpoint intact`
       );
 
       // Release lease for subsequent test steps
@@ -734,11 +710,16 @@ export async function runFunctionsEmulatorTests(options?: {
         _gen: 1,
       });
 
-      // 2. Sign in as Bob and assert Bob's UID is strictly verified
-      await createAndSignInEmulatorUser(testAuth, host, authPort, bobUid, 'bob@test.emulator');
+      // 2. Sign in as Bob using Admin Auth + Client SDK and assert Bob's UID is strictly verified
+      await createAndSignInEmulatorUser(testAuth, adminAuth, bobUid, 'bob@test.emulator');
       const bobCurrentUid: string | undefined = testAuth.currentUser?.uid;
       if (bobCurrentUid !== bobUid) {
         throw new Error(`Account isolation setup failed: currentUser is ${bobCurrentUid}, expected ${bobUid}`);
+      }
+
+      // Explicit verification that Alice and Bob are genuinely separate authenticated accounts
+      if ((bobCurrentUid as string) === (aliceUid as string)) {
+        throw new Error(`Account isolation setup failed: Bob UID cannot match Alice UID (${bobCurrentUid} === ${aliceUid})`);
       }
 
       // Initialize Bob's sync metadata
@@ -806,6 +787,7 @@ export async function runFunctionsEmulatorTests(options?: {
 
   } finally {
     await deleteApp(testApp);
+    await deleteAdminApp(adminApp).catch(() => {});
   }
 
   return {
