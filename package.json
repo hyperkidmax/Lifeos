@@ -8,9 +8,14 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx src/test/dataIntegrity.test.ts",
+    "test:rules": "tsx src/test/firestore.rules.test.ts",
+    "test:emulator": "tsx src/test/functions.emulator.test.ts",
+    "test:emulator:clean": "curl -s -X DELETE http://127.0.0.1:8080/emulator/v1/projects/lifeos-rules-test-project/databases/ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4/documents || true"
   },
   "dependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",

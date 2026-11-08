@@ -5,6 +5,7 @@ import {
   signInWithPopup,
   signOut,
   User,
+  connectAuthEmulator,
 } from 'firebase/auth';
 import {
   getFirestore,
@@ -15,8 +16,9 @@ import {
   collection,
   writeBatch,
   getDocFromServer,
+  connectFirestoreEmulator,
 } from 'firebase/firestore';
-import { getFunctions, httpsCallable } from 'firebase/functions';
+import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   LifeOSData,
@@ -44,6 +46,46 @@ export const auth = getAuth(app);
 export const functions = getFunctions(app, 'asia-northeast1');
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+// Explicit Emulator Connection Support:
+// Guarantees that production builds NEVER connect to localhost or an emulator accidentally.
+// Emulators are connected ONLY when explicitly opted-in via VITE_USE_FIREBASE_EMULATOR === 'true'
+// or window.__USE_FIREBASE_EMULATOR__ in isolated test harnesses.
+let isEmulatorConnected = false;
+export function connectLifeOSEmulators(options?: {
+  host?: string;
+  authPort?: number;
+  firestorePort?: number;
+  functionsPort?: number;
+}): void {
+  if (isEmulatorConnected) return;
+
+  const host = options?.host || (typeof process !== 'undefined' && process.env?.FIREBASE_EMULATOR_HOST) || '127.0.0.1';
+  const authPort = options?.authPort || 9099;
+  const firestorePort = options?.firestorePort || 8080;
+  const functionsPort = options?.functionsPort || 5001;
+
+  try {
+    connectAuthEmulator(auth, `http://${host}:${authPort}`, { disableWarnings: true });
+    connectFirestoreEmulator(db, host, firestorePort);
+    connectFunctionsEmulator(functions, host, functionsPort);
+    isEmulatorConnected = true;
+    console.info(`[LifeOS] Successfully connected to Firebase Emulators at ${host} (Auth: ${authPort}, Firestore: ${firestorePort}, Functions: ${functionsPort})`);
+  } catch (err: any) {
+    // Already connected or failed
+    console.warn(`[LifeOS] connectLifeOSEmulators notice:`, err?.message || err);
+  }
+}
+
+// Auto-connect ONLY when explicitly flagged in environment or test window
+const shouldAutoConnectEmulator =
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_USE_FIREBASE_EMULATOR === 'true') ||
+  (typeof window !== 'undefined' && (window as any).__USE_FIREBASE_EMULATOR__ === true) ||
+  (typeof process !== 'undefined' && process.env?.USE_FIREBASE_EMULATOR === 'true');
+
+if (shouldAutoConnectEmulator) {
+  connectLifeOSEmulators();
+}
 
 
 // Operation types for strict Firestore error handling
