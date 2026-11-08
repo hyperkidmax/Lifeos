@@ -172,14 +172,38 @@ export async function deleteRecordViaCloudFunction(
   }
 }
 
-// 2. Batch register tombstones via Cloud Function (chunked to max 200 items per call)
+// 2. Batch register tombstones via Cloud Function (chunked to max 100 items per call)
+export interface ClientBatchTombstoneItemResult {
+  collection: string;
+  id: string;
+  status: 'registered' | 'already_existed' | 'failed';
+  error?: string;
+}
+
 export async function batchRecordTombstonesViaCloudFunction(
   items: Array<{ collection: string; id: string; deletedAt?: number }>
-): Promise<{ success: boolean; registeredCount?: number; alreadyExistedCount?: number; error?: string }> {
-  if (!items || items.length === 0) return { success: true, registeredCount: 0, alreadyExistedCount: 0 };
-  const CHUNK_SIZE = 200;
+): Promise<{
+  success: boolean;
+  registeredCount: number;
+  alreadyExistedCount: number;
+  failedCount: number;
+  results: ClientBatchTombstoneItemResult[];
+  error?: string;
+}> {
+  if (!items || items.length === 0) {
+    return {
+      success: true,
+      registeredCount: 0,
+      alreadyExistedCount: 0,
+      failedCount: 0,
+      results: [],
+    };
+  }
+  const CHUNK_SIZE = 100;
   let totalRegistered = 0;
   let totalAlreadyExisted = 0;
+  let totalFailed = 0;
+  const allResults: ClientBatchTombstoneItemResult[] = [];
 
   try {
     const batchFn = httpsCallable<{ items: any[] }, any>(
@@ -189,16 +213,35 @@ export async function batchRecordTombstonesViaCloudFunction(
 
     for (let i = 0; i < items.length; i += CHUNK_SIZE) {
       const chunk = items.slice(i, i + CHUNK_SIZE);
-      const result = await batchFn({ items: chunk });
-      if (result.data) {
-        totalRegistered += result.data.registeredCount || 0;
-        totalAlreadyExisted += result.data.alreadyExistedCount || 0;
+      try {
+        const result = await batchFn({ items: chunk });
+        if (result.data) {
+          totalRegistered += result.data.registeredCount || 0;
+          totalAlreadyExisted += result.data.alreadyExistedCount || 0;
+          totalFailed += result.data.failedCount || 0;
+          if (Array.isArray(result.data.results)) {
+            allResults.push(...result.data.results);
+          }
+        }
+      } catch (chunkError: any) {
+        // Chunk failed completely (e.g. network timeout or server rejection)
+        for (const item of chunk) {
+          allResults.push({
+            collection: item.collection,
+            id: item.id,
+            status: 'failed',
+            error: chunkError.message || String(chunkError),
+          });
+          totalFailed++;
+        }
       }
     }
     return {
-      success: true,
+      success: totalFailed === 0,
       registeredCount: totalRegistered,
       alreadyExistedCount: totalAlreadyExisted,
+      failedCount: totalFailed,
+      results: allResults,
     };
   } catch (error: any) {
     console.warn(`Cloud Function batchRecordTombstones failed or offline:`, error);
@@ -207,6 +250,13 @@ export async function batchRecordTombstonesViaCloudFunction(
       error: error.message || String(error),
       registeredCount: totalRegistered,
       alreadyExistedCount: totalAlreadyExisted,
+      failedCount: items.length,
+      results: items.map((it) => ({
+        collection: it.collection,
+        id: it.id,
+        status: 'failed',
+        error: error.message || String(error),
+      })),
     };
   }
 }
@@ -368,7 +418,8 @@ export async function saveAllUserRecordsToFirestore(
   // Sanitize localData to guarantee that NO demo records are ever prepared for Firestore
   const cleanData = filterOutDemoRecords(localData);
   const activeGen = cleanData.generation || 1;
-  const tombstoneIds = new Set((cleanData.tombstones || []).map((t) => t.id));
+  const tombstoneKeySet = new Set((cleanData.tombstones || []).map((t) => `${t.collection}__${t.id}`));
+  const isTombstoned = (col: string, id: string) => tombstoneKeySet.has(`${col}__${id}`);
 
   // 1. User profile document: /users/{userId}
   writeItems.push({
@@ -407,7 +458,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 3. Granular Meals Subcollection: /users/{userId}/mealLogs/{meal.id}
   for (const meal of cleanData.mealLogs) {
-    if (meal && meal.id && !isDemoRecord(meal) && !tombstoneIds.has(meal.id)) {
+    if (meal && meal.id && !isDemoRecord(meal) && !isTombstoned('mealLogs', meal.id)) {
       writeItems.push({
         path: `users/${userId}/mealLogs/${meal.id}`,
         data: {
@@ -427,7 +478,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 4. Granular Hydration Subcollection: /users/{userId}/waterLogs/{water.id}
   for (const water of cleanData.waterLogs) {
-    if (water && water.id && !isDemoRecord(water) && !tombstoneIds.has(water.id)) {
+    if (water && water.id && !isDemoRecord(water) && !isTombstoned('waterLogs', water.id)) {
       writeItems.push({
         path: `users/${userId}/waterLogs/${water.id}`,
         data: {
@@ -443,7 +494,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 5. Granular Workouts Subcollection: /users/{userId}/workoutLogs/{workout.id}
   for (const workout of cleanData.workoutLogs) {
-    if (workout && workout.id && !isDemoRecord(workout) && !tombstoneIds.has(workout.id)) {
+    if (workout && workout.id && !isDemoRecord(workout) && !isTombstoned('workoutLogs', workout.id)) {
       writeItems.push({
         path: `users/${userId}/workoutLogs/${workout.id}`,
         data: {
@@ -460,7 +511,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 6. Granular Journal Entries Subcollection: /users/{userId}/journalEntries/{journal.id}
   for (const journal of cleanData.journalEntries) {
-    if (journal && journal.id && !isDemoRecord(journal) && !tombstoneIds.has(journal.id)) {
+    if (journal && journal.id && !isDemoRecord(journal) && !isTombstoned('journalEntries', journal.id)) {
       writeItems.push({
         path: `users/${userId}/journalEntries/${journal.id}`,
         data: {
@@ -478,7 +529,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 7. Granular Body Logs Subcollection: /users/{userId}/bodyLogs/{body.id}
   for (const body of cleanData.bodyLogs) {
-    if (body && body.id && !isDemoRecord(body) && !tombstoneIds.has(body.id)) {
+    if (body && body.id && !isDemoRecord(body) && !isTombstoned('bodyLogs', body.id)) {
       writeItems.push({
         path: `users/${userId}/bodyLogs/${body.id}`,
         data: {
@@ -494,7 +545,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 8. Granular Habits Subcollection: /users/{userId}/habits/{habit.id}
   for (const habit of cleanData.habits) {
-    if (habit && habit.id && !isDemoRecord(habit) && !tombstoneIds.has(habit.id)) {
+    if (habit && habit.id && !isDemoRecord(habit) && !isTombstoned('habits', habit.id)) {
       writeItems.push({
         path: `users/${userId}/habits/${habit.id}`,
         data: {
@@ -509,7 +560,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 9. Granular Priorities Subcollection: /users/{userId}/dailyPriorities/{priority.id}
   for (const priority of cleanData.dailyPriorities) {
-    if (priority && priority.id && !isDemoRecord(priority) && !tombstoneIds.has(priority.id)) {
+    if (priority && priority.id && !isDemoRecord(priority) && !isTombstoned('dailyPriorities', priority.id)) {
       writeItems.push({
         path: `users/${userId}/dailyPriorities/${priority.id}`,
         data: {
@@ -525,7 +576,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 10. Steps Subcollection: /users/{userId}/stepLogs/{step.id}
   for (const step of cleanData.stepLogs) {
-    if (step && step.id && !isDemoRecord(step) && !tombstoneIds.has(step.id)) {
+    if (step && step.id && !isDemoRecord(step) && !isTombstoned('stepLogs', step.id)) {
       writeItems.push({
         path: `users/${userId}/stepLogs/${step.id}`,
         data: {
@@ -541,7 +592,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 11. Sleep Subcollection: /users/{userId}/sleepLogs/{sleep.id}
   for (const sleep of cleanData.sleepLogs) {
-    if (sleep && sleep.id && !isDemoRecord(sleep) && !tombstoneIds.has(sleep.id)) {
+    if (sleep && sleep.id && !isDemoRecord(sleep) && !isTombstoned('sleepLogs', sleep.id)) {
       writeItems.push({
         path: `users/${userId}/sleepLogs/${sleep.id}`,
         data: {
@@ -557,7 +608,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 12. Heart Rate Subcollection: /users/{userId}/heartRateLogs/{hr.id}
   for (const hr of cleanData.heartRateLogs) {
-    if (hr && hr.id && !isDemoRecord(hr) && !tombstoneIds.has(hr.id)) {
+    if (hr && hr.id && !isDemoRecord(hr) && !isTombstoned('heartRateLogs', hr.id)) {
       writeItems.push({
         path: `users/${userId}/heartRateLogs/${hr.id}`,
         data: {
@@ -572,7 +623,7 @@ export async function saveAllUserRecordsToFirestore(
 
   // 13. Saved Foods Subcollection: /users/{userId}/savedFoods/{food.id}
   for (const food of cleanData.savedFoods) {
-    if (food && food.id && !isDemoRecord(food) && !tombstoneIds.has(food.id)) {
+    if (food && food.id && !isDemoRecord(food) && !isTombstoned('savedFoods', food.id)) {
       writeItems.push({
         path: `users/${userId}/savedFoods/${food.id}`,
         data: {
@@ -1047,28 +1098,30 @@ export async function syncAndMergeWithCloud(
 
   // Step 1: Fetch remote tombstones and reconcile with local tombstones
   const cloudTombstones = await fetchUserTombstones(userId);
+  // Step 1: Construct merged tombstone map from local and cloud sources
   const localTombstones = workingLocalData.tombstones || [];
   const tombstoneMap = new Map<string, RecordTombstone>();
   for (const t of [...localTombstones, ...cloudTombstones]) {
     tombstoneMap.set(`${t.collection}__${t.id}`, t);
   }
   const allTombstones = Array.from(tombstoneMap.values());
-  const tombstoneIds = new Set(allTombstones.map((t) => t.id));
+  const tombstoneKeySet = new Set(allTombstones.map((t) => `${t.collection}__${t.id}`));
+  const isTombstoned = (col: string, id: string) => tombstoneKeySet.has(`${col}__${id}`);
 
-  // Step 2: Purge local records matching active tombstones
+  // Step 2: Purge local records matching active tombstones (collection-specific)
   const localSansTombstones: LifeOSData = {
     ...workingLocalData,
-    mealLogs: (workingLocalData.mealLogs || []).filter((m) => !tombstoneIds.has(m.id)),
-    waterLogs: (workingLocalData.waterLogs || []).filter((w) => !tombstoneIds.has(w.id)),
-    workoutLogs: (workingLocalData.workoutLogs || []).filter((w) => !tombstoneIds.has(w.id)),
-    journalEntries: (workingLocalData.journalEntries || []).filter((j) => !tombstoneIds.has(j.id)),
-    bodyLogs: (workingLocalData.bodyLogs || []).filter((b) => !tombstoneIds.has(b.id)),
-    habits: (workingLocalData.habits || []).filter((h) => !tombstoneIds.has(h.id)),
-    dailyPriorities: (workingLocalData.dailyPriorities || []).filter((p) => !tombstoneIds.has(p.id)),
-    stepLogs: (workingLocalData.stepLogs || []).filter((s) => !tombstoneIds.has(s.id)),
-    sleepLogs: (workingLocalData.sleepLogs || []).filter((s) => !tombstoneIds.has(s.id)),
-    heartRateLogs: (workingLocalData.heartRateLogs || []).filter((h) => !tombstoneIds.has(h.id)),
-    savedFoods: (workingLocalData.savedFoods || []).filter((f) => !tombstoneIds.has(f.id)),
+    mealLogs: (workingLocalData.mealLogs || []).filter((m) => !isTombstoned('mealLogs', m.id)),
+    waterLogs: (workingLocalData.waterLogs || []).filter((w) => !isTombstoned('waterLogs', w.id)),
+    workoutLogs: (workingLocalData.workoutLogs || []).filter((w) => !isTombstoned('workoutLogs', w.id)),
+    journalEntries: (workingLocalData.journalEntries || []).filter((j) => !isTombstoned('journalEntries', j.id)),
+    bodyLogs: (workingLocalData.bodyLogs || []).filter((b) => !isTombstoned('bodyLogs', b.id)),
+    habits: (workingLocalData.habits || []).filter((h) => !isTombstoned('habits', h.id)),
+    dailyPriorities: (workingLocalData.dailyPriorities || []).filter((p) => !isTombstoned('dailyPriorities', p.id)),
+    stepLogs: (workingLocalData.stepLogs || []).filter((s) => !isTombstoned('stepLogs', s.id)),
+    sleepLogs: (workingLocalData.sleepLogs || []).filter((s) => !isTombstoned('sleepLogs', s.id)),
+    heartRateLogs: (workingLocalData.heartRateLogs || []).filter((h) => !isTombstoned('heartRateLogs', h.id)),
+    savedFoods: (workingLocalData.savedFoods || []).filter((f) => !isTombstoned('savedFoods', f.id)),
     tombstones: allTombstones,
   };
 
@@ -1099,18 +1152,18 @@ export async function syncAndMergeWithCloud(
     fetchSubcollectionDocs<FoodItem>(userId, 'savedFoods'),
   ]);
 
-  // Filter out demo records AND any documents matching active tombstones
-  const cloudMeals = rawCloudMeals.filter((m) => !isDemoRecord(m) && !tombstoneIds.has(m.id));
-  const cloudWater = rawCloudWater.filter((w) => !isDemoRecord(w) && !tombstoneIds.has(w.id));
-  const cloudWorkouts = rawCloudWorkouts.filter((w) => !isDemoRecord(w) && !tombstoneIds.has(w.id));
-  const cloudJournal = rawCloudJournal.filter((j) => !isDemoRecord(j) && !tombstoneIds.has(j.id));
-  const cloudBody = rawCloudBody.filter((b) => !isDemoRecord(b) && !tombstoneIds.has(b.id));
-  const cloudHabits = rawCloudHabits.filter((h) => !isDemoRecord(h) && !tombstoneIds.has(h.id));
-  const cloudPriorities = rawCloudPriorities.filter((p) => !isDemoRecord(p) && !tombstoneIds.has(p.id));
-  const cloudSteps = rawCloudSteps.filter((s) => !isDemoRecord(s) && !tombstoneIds.has(s.id));
-  const cloudSleep = rawCloudSleep.filter((s) => !isDemoRecord(s) && !tombstoneIds.has(s.id));
-  const cloudHr = rawCloudHr.filter((h) => !isDemoRecord(h) && !tombstoneIds.has(h.id));
-  const cloudFoods = rawCloudFoods.filter((f) => !isDemoRecord(f) && !tombstoneIds.has(f.id));
+  // Filter out demo records AND any documents matching active collection-specific tombstones
+  const cloudMeals = rawCloudMeals.filter((m) => !isDemoRecord(m) && !isTombstoned('mealLogs', m.id));
+  const cloudWater = rawCloudWater.filter((w) => !isDemoRecord(w) && !isTombstoned('waterLogs', w.id));
+  const cloudWorkouts = rawCloudWorkouts.filter((w) => !isDemoRecord(w) && !isTombstoned('workoutLogs', w.id));
+  const cloudJournal = rawCloudJournal.filter((j) => !isDemoRecord(j) && !isTombstoned('journalEntries', j.id));
+  const cloudBody = rawCloudBody.filter((b) => !isDemoRecord(b) && !isTombstoned('bodyLogs', b.id));
+  const cloudHabits = rawCloudHabits.filter((h) => !isDemoRecord(h) && !isTombstoned('habits', h.id));
+  const cloudPriorities = rawCloudPriorities.filter((p) => !isDemoRecord(p) && !isTombstoned('dailyPriorities', p.id));
+  const cloudSteps = rawCloudSteps.filter((s) => !isDemoRecord(s) && !isTombstoned('stepLogs', s.id));
+  const cloudSleep = rawCloudSleep.filter((s) => !isDemoRecord(s) && !isTombstoned('sleepLogs', s.id));
+  const cloudHr = rawCloudHr.filter((h) => !isDemoRecord(h) && !isTombstoned('heartRateLogs', h.id));
+  const cloudFoods = rawCloudFoods.filter((f) => !isDemoRecord(f) && !isTombstoned('savedFoods', f.id));
 
   // Sanitize local data so that no local demo records are merged
   const cleanLocalData = filterOutDemoRecords(localSansTombstones);
@@ -1171,18 +1224,38 @@ export async function syncAndMergeWithCloud(
     mergedHr.addedFromCloud +
     mergedFoods.addedFromCloud;
 
-  // Step 5: Flush any pending tombstones to cloud via callable function
-  const pendingTombstones = cleanLocalData.pendingTombstones || [];
-  if (pendingTombstones.length > 0) {
+  // Step 5: Flush pending tombstones to cloud via callable function with strict acknowledgement verification
+  const initialPendingTombstones = cleanLocalData.pendingTombstones || [];
+  let remainingPendingTombstones = [...initialPendingTombstones];
+
+  if (initialPendingTombstones.length > 0) {
     try {
       const res = await batchRecordTombstonesViaCloudFunction(
-        pendingTombstones.map((t) => ({ collection: t.collection, id: t.id, deletedAt: t.deletedAt }))
+        initialPendingTombstones.map((t) => ({ collection: t.collection, id: t.id, deletedAt: t.deletedAt }))
       );
-      if (res.success) {
-        for (const t of pendingTombstones) {
+
+      // Build a set of confirmed keys: collection__id
+      const confirmedKeys = new Set<string>();
+      if (Array.isArray(res.results)) {
+        for (const itemResult of res.results) {
+          if (itemResult.status === 'registered' || itemResult.status === 'already_existed') {
+            confirmedKeys.add(`${itemResult.collection}__${itemResult.id}`);
+          }
+        }
+      }
+
+      // Acknowledge locally ONLY the confirmed items
+      for (const t of initialPendingTombstones) {
+        const key = `${t.collection}__${t.id}`;
+        if (confirmedKeys.has(key)) {
           await localDb.markTombstoneSynced(userId, t.collection, t.id);
         }
       }
+
+      // Retain unconfirmed or failed items in local memory for retry
+      remainingPendingTombstones = initialPendingTombstones.filter(
+        (t) => !confirmedKeys.has(`${t.collection}__${t.id}`)
+      );
     } catch (e) {
       console.warn('Pending tombstones flush queued for next sync:', e);
     }
@@ -1194,7 +1267,7 @@ export async function syncAndMergeWithCloud(
     isDemoMode: localData.isDemoMode,
     generation: serverGen,
     tombstones: allTombstones,
-    pendingTombstones: [],
+    pendingTombstones: remainingPendingTombstones,
     profile: {
       ...cloudProfile,
       ...cleanLocalData.profile,

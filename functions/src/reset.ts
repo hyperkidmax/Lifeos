@@ -80,6 +80,7 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
       currentCollectionIndex: 0,
       deletedCount: 0,
       leaseUntil: 0,
+      leaseToken: 0,
     });
 
     return nextGen;
@@ -93,7 +94,7 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
   };
 });
 
-// 3. Execute Reset Chunk: Transactional lease locking, checkpointing, preserving tombstones
+// 3. Execute Reset Chunk: Transactional lease locking, fencing token validation, checkpointing, preserving tombstones
 export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (request) => {
   const uid = request.auth?.uid;
   if (!uid) {
@@ -102,12 +103,13 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
 
   const resetRef = adminDb.doc(`users/${uid}/meta/reset`);
 
-  // Transactionally acquire a 30-second execution lease to prevent race conditions from concurrent chunk requests
+  // Transactionally acquire a 30-second execution lease with a monotonically increasing leaseToken (fencing token)
   const now = Date.now();
   let resetData: FirebaseFirestore.DocumentData;
+  let assignedLeaseToken = 0;
 
   try {
-    resetData = await adminDb.runTransaction(async (tx) => {
+    const acquireResult = await adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(resetRef);
       if (!snap.exists || snap.data()?.status !== 'in_progress') {
         throw new HttpsError('failed-precondition', 'No active reset in progress');
@@ -121,13 +123,17 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
         );
       }
 
+      const nextToken = (d.leaseToken || 0) + 1;
       tx.update(resetRef, {
         leaseUntil: now + 30000,
+        leaseToken: nextToken,
         lastLeaseAcquiredAt: FieldValue.serverTimestamp(),
       });
 
-      return d;
+      return { data: d, token: nextToken };
     });
+    resetData = acquireResult.data;
+    assignedLeaseToken = acquireResult.token;
   } catch (err: any) {
     if (err instanceof HttpsError) throw err;
     throw new HttpsError('internal', err.message || 'Failed to acquire reset lock');
@@ -179,12 +185,33 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
     const isFinished = colIndex >= collectionsToWipe.length;
     const totalDeleted = (resetData.deletedCount || 0) + chunkDeleted;
 
-    // Release lease and commit new checkpoint
-    await resetRef.update({
-      currentCollectionIndex: colIndex,
-      deletedCount: totalDeleted,
-      leaseUntil: 0,
-      lastChunkProcessedAt: FieldValue.serverTimestamp(),
+    // Fencing token verification: Transactionally verify this worker still holds the valid leaseToken
+    // before committing checkpoint and releasing the lease
+    await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(resetRef);
+      if (!snap.exists) {
+        throw new HttpsError('aborted', 'Reset state document was deleted');
+      }
+      const cur = snap.data()!;
+      if (cur.leaseToken !== assignedLeaseToken) {
+        throw new HttpsError(
+          'aborted',
+          `Reset lease fencing token mismatch (held: ${assignedLeaseToken}, current: ${cur.leaseToken}); another worker took over`
+        );
+      }
+      if (cur.leaseUntil < Date.now()) {
+        throw new HttpsError(
+          'deadline-exceeded',
+          'Reset execution lease expired before checkpoint could be committed'
+        );
+      }
+
+      tx.update(resetRef, {
+        currentCollectionIndex: colIndex,
+        deletedCount: totalDeleted,
+        leaseUntil: 0,
+        lastChunkProcessedAt: FieldValue.serverTimestamp(),
+      });
     });
 
     return {
@@ -193,11 +220,22 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
       totalDeleted,
       currentCollectionIndex: colIndex,
       isFinished,
+      leaseToken: assignedLeaseToken,
       status: isFinished ? 'verifying' : 'in_progress',
     };
   } catch (err: any) {
-    // Release lease on error so subsequent attempts are not blocked
-    await resetRef.update({ leaseUntil: 0 }).catch(() => {});
+    // Release lease on error only if our assigned leaseToken is still active
+    try {
+      await adminDb.runTransaction(async (tx) => {
+        const snap = await tx.get(resetRef);
+        if (snap.exists && snap.data()?.leaseToken === assignedLeaseToken) {
+          tx.update(resetRef, { leaseUntil: 0 });
+        }
+      });
+    } catch {
+      // Ignore cleanup error
+    }
+    if (err instanceof HttpsError) throw err;
     throw new HttpsError('internal', err.message || 'Reset chunk processing failed');
   }
 });

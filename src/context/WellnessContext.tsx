@@ -1073,21 +1073,23 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
 
       // 4. Sanitize and normalize incoming logs:
       // - Filter out any positively confirmed demo records
-      // - Reject records matching active tombstones to prevent resurrection of deleted data
+      // - Reject records matching active tombstones to prevent resurrection of deleted data (collection-specific)
       // - Preserve genuine historical provenance ('manual', 'sensor', 'health_connect', 'sensor_disconnected')
       // - Stamp 'import' only if the incoming record is genuine and has no existing provenance
-      const tombstoneIds = new Set((dataRef.current.tombstones || []).map((t) => t.id));
+      const tombstoneKeySet = new Set((dataRef.current.tombstones || []).map((t) => `${t.collection}__${t.id}`));
+      const isTombstoned = (col: string, id: string) => tombstoneKeySet.has(`${col}__${id}`);
       const activeGeneration = dataRef.current.generation || 1;
 
       const sanitizeImportList = <T extends { id: string; source?: any; _gen?: number }>(
-        list: T[] | undefined
+        list: T[] | undefined,
+        collectionName: string
       ): T[] => {
         if (!Array.isArray(list)) return [];
         const clean: T[] = [];
         for (const item of list) {
           if (!item || typeof item !== 'object' || !item.id) continue;
           if (isDemoRecord(item)) continue; // Never import synthetic demo records into user data
-          if (tombstoneIds.has(item.id)) continue; // Never resurrect deleted/tombstoned records
+          if (isTombstoned(collectionName, item.id)) continue; // Never resurrect deleted/tombstoned records in this collection
 
           // Preserve existing valid provenance, or assign 'import' if unassigned
           let source = item.source;
@@ -1104,18 +1106,18 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
         return clean;
       };
 
-      const importedSteps = sanitizeImportList<StepLog>(parsed.stepLogs);
-      const importedSleep = sanitizeImportList<SleepLog>(parsed.sleepLogs);
-      const importedHr = sanitizeImportList<HeartRateLog>(parsed.heartRateLogs);
-      const importedWater = sanitizeImportList<WaterLog>(parsed.waterLogs);
-      const importedMeals = sanitizeImportList<MealLog>(parsed.mealLogs);
-      const importedWorkouts = sanitizeImportList<WorkoutLog>(parsed.workoutLogs);
-      const importedHabits = sanitizeImportList<Habit>(parsed.habits);
-      const importedPriorities = sanitizeImportList<DailyPriority>(parsed.dailyPriorities);
-      const importedJournal = sanitizeImportList<JournalEntry>(parsed.journalEntries);
-      const importedBodyLogs = sanitizeImportList<BodyMeasurementLog>(parsed.bodyLogs);
+      const importedSteps = sanitizeImportList<StepLog>(parsed.stepLogs, 'stepLogs');
+      const importedSleep = sanitizeImportList<SleepLog>(parsed.sleepLogs, 'sleepLogs');
+      const importedHr = sanitizeImportList<HeartRateLog>(parsed.heartRateLogs, 'heartRateLogs');
+      const importedWater = sanitizeImportList<WaterLog>(parsed.waterLogs, 'waterLogs');
+      const importedMeals = sanitizeImportList<MealLog>(parsed.mealLogs, 'mealLogs');
+      const importedWorkouts = sanitizeImportList<WorkoutLog>(parsed.workoutLogs, 'workoutLogs');
+      const importedHabits = sanitizeImportList<Habit>(parsed.habits, 'habits');
+      const importedPriorities = sanitizeImportList<DailyPriority>(parsed.dailyPriorities, 'dailyPriorities');
+      const importedJournal = sanitizeImportList<JournalEntry>(parsed.journalEntries, 'journalEntries');
+      const importedBodyLogs = sanitizeImportList<BodyMeasurementLog>(parsed.bodyLogs, 'bodyLogs');
       const importedSavedFoods: FoodItem[] = Array.isArray(parsed.savedFoods)
-        ? parsed.savedFoods.filter((f: any) => f && f.id && !isDemoRecord(f))
+        ? parsed.savedFoods.filter((f: any) => f && f.id && !isDemoRecord(f) && !isTombstoned('savedFoods', f.id))
         : [];
 
       const totalImportableLogs =

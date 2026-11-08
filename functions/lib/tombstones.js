@@ -104,74 +104,123 @@ exports.batchRecordTombstones = (0, https_1.onCall)({ region: 'asia-northeast1' 
         throw new https_1.HttpsError('failed-precondition', 'Global reset is in progress');
     }
     const currentGen = syncSnap.exists ? (syncSnap.data()?.currentGeneration || 1) : 1;
+    // Validate items up-front while tracking per-item status
+    const results = [];
     const validated = [];
-    const failedItems = [];
     for (const item of items) {
         if (!item || typeof item !== 'object') {
-            failedItems.push({ item, reason: 'Item is not an object' });
+            results.push({
+                collection: item?.collection || 'unknown',
+                id: item?.id || 'unknown',
+                status: 'failed',
+                error: 'Item is not an object',
+            });
             continue;
         }
         if (!item.collection || !config_js_1.SUPPORTED_COLLECTIONS.includes(item.collection)) {
-            failedItems.push({ item, reason: `Unsupported collection: ${item.collection}` });
+            results.push({
+                collection: item.collection || 'unknown',
+                id: item.id || 'unknown',
+                status: 'failed',
+                error: `Unsupported collection: ${item.collection}`,
+            });
             continue;
         }
         try {
             const cleanId = sanitizeRecordId(item.id);
             const tombstoneDocId = getTombstoneDocId(item.collection, cleanId);
             validated.push({
+                rawCollection: item.collection,
+                rawId: item.id,
                 cleanId,
                 collection: item.collection,
                 tombstoneDocId,
             });
         }
         catch (e) {
-            failedItems.push({ item, reason: e.message || 'Invalid record ID' });
+            results.push({
+                collection: item.collection,
+                id: item.id,
+                status: 'failed',
+                error: e.message || 'Invalid record ID',
+            });
         }
     }
     let registeredCount = 0;
     let alreadyExistedCount = 0;
-    // Chunk validated items into batches of 200 items (max 400 writes, staying under 500-write limit)
-    const CHUNK_SIZE = 200;
+    // Process validated items in atomic, transactional chunks of up to 100 items (200 ops per transaction <= 500 limit).
+    // Using runTransaction with tx.getAll guarantees optimistic concurrency control:
+    // If a concurrent worker is registering the same tombstone doc, the transaction serializes cleanly
+    // and the second worker observes exists=true, leaving existing metadata completely immutable.
+    const CHUNK_SIZE = 100;
     for (let i = 0; i < validated.length; i += CHUNK_SIZE) {
         const chunk = validated.slice(i, i + CHUNK_SIZE);
-        const tombstoneRefs = chunk.map((v) => config_js_1.adminDb.doc(`users/${uid}/tombstones/${v.tombstoneDocId}`));
-        // Efficiently inspect existing tombstones in one roundtrip
-        const snaps = await config_js_1.adminDb.getAll(...tombstoneRefs);
-        const existingSet = new Set();
-        snaps.forEach((s) => {
-            if (s.exists) {
-                existingSet.add(s.id);
-            }
-        });
-        const batch = config_js_1.adminDb.batch();
-        for (const v of chunk) {
-            const tombstoneRef = config_js_1.adminDb.doc(`users/${uid}/tombstones/${v.tombstoneDocId}`);
-            const recordRef = config_js_1.adminDb.doc(`users/${uid}/${v.collection}/${v.cleanId}`);
-            if (existingSet.has(v.tombstoneDocId)) {
-                // Never overwrite existing tombstone metadata; only ensure record document is purged
-                batch.delete(recordRef);
-                alreadyExistedCount++;
-            }
-            else {
-                batch.set(tombstoneRef, {
-                    id: v.cleanId,
-                    collection: v.collection,
-                    deletedAt: firestore_1.FieldValue.serverTimestamp(),
-                    deletedByUid: uid,
-                    generation: currentGen,
-                    tombstoneVersion: 1,
+        try {
+            const chunkResults = await config_js_1.adminDb.runTransaction(async (tx) => {
+                const tombstoneRefs = chunk.map((v) => config_js_1.adminDb.doc(`users/${uid}/tombstones/${v.tombstoneDocId}`));
+                const tombstoneSnaps = await tx.getAll(...tombstoneRefs);
+                const subResults = [];
+                chunk.forEach((v, idx) => {
+                    const snap = tombstoneSnaps[idx];
+                    const tombstoneRef = tombstoneRefs[idx];
+                    const recordRef = config_js_1.adminDb.doc(`users/${uid}/${v.collection}/${v.cleanId}`);
+                    if (snap.exists) {
+                        // Existing tombstone found: NEVER overwrite original deletion metadata!
+                        // Ensure record document is deleted (idempotent purge)
+                        tx.delete(recordRef);
+                        subResults.push({
+                            collection: v.rawCollection,
+                            id: v.rawId,
+                            status: 'already_existed',
+                        });
+                    }
+                    else {
+                        // Create brand new immutable tombstone
+                        tx.set(tombstoneRef, {
+                            id: v.cleanId,
+                            collection: v.collection,
+                            deletedAt: firestore_1.FieldValue.serverTimestamp(),
+                            deletedByUid: uid,
+                            generation: currentGen,
+                            tombstoneVersion: 1,
+                        });
+                        tx.delete(recordRef);
+                        subResults.push({
+                            collection: v.rawCollection,
+                            id: v.rawId,
+                            status: 'registered',
+                        });
+                    }
                 });
-                batch.delete(recordRef);
-                registeredCount++;
+                return subResults;
+            });
+            for (const res of chunkResults) {
+                results.push(res);
+                if (res.status === 'registered')
+                    registeredCount++;
+                else if (res.status === 'already_existed')
+                    alreadyExistedCount++;
             }
         }
-        await batch.commit();
+        catch (chunkError) {
+            // If transaction fails after retries, mark every item in this chunk as failed for client retry
+            for (const v of chunk) {
+                results.push({
+                    collection: v.rawCollection,
+                    id: v.rawId,
+                    status: 'failed',
+                    error: chunkError.message || String(chunkError),
+                });
+            }
+        }
     }
+    const failedCount = results.filter((r) => r.status === 'failed').length;
     return {
-        success: true,
+        success: failedCount === 0,
         registeredCount,
         alreadyExistedCount,
-        failedItems,
+        failedCount,
+        results,
         generation: currentGen,
     };
 });

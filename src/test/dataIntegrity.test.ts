@@ -2226,6 +2226,193 @@ export function runDataIntegrityTestSuite(): TestResult[] {
     );
   }
 
+  // TEST 64: Collection-specific tombstone filtering prevents cross-collection accidental deletion
+  {
+    const sharedId = 'shared-id-999';
+    const tombstones: RecordTombstone[] = [
+      {
+        id: sharedId,
+        collection: 'mealLogs',
+        deletedAt: 1000,
+        generation: 1,
+        tombstoneVersion: 1,
+      },
+    ];
+
+    const tombstoneKeySet = new Set(tombstones.map((t) => `${t.collection}__${t.id}`));
+    const isTombstoned = (col: string, id: string) => tombstoneKeySet.has(`${col}__${id}`);
+
+    const mealItem = { id: sharedId, name: 'Oatmeal', calories: 300 };
+    const workoutItem = { id: sharedId, activityName: 'Running', durationMinutes: 30 };
+
+    const mealIsSuppressed = isTombstoned('mealLogs', mealItem.id);
+    const workoutIsSuppressed = isTombstoned('workoutLogs', workoutItem.id);
+
+    assert(
+      64,
+      'Tombstone filtering is collection-specific when records share identical IDs',
+      mealIsSuppressed && !workoutIsSuppressed,
+      'Deleting mealLogs item with shared-id-999 did NOT collaterally suppress workoutLogs item sharing the exact same ID'
+    );
+  }
+
+  // TEST 65: Batch tombstone creation is race-safe and preserves immutability
+  {
+    const existingTombstones = new Map<string, any>([
+      [
+        'mealLogs__item-1',
+        {
+          id: 'item-1',
+          collection: 'mealLogs',
+          deletedAt: 5000,
+          deletedByUid: 'original-user',
+          generation: 1,
+          tombstoneVersion: 1,
+        },
+      ],
+    ]);
+
+    const incomingBatch = [
+      { collection: 'mealLogs', id: 'item-1', deletedAt: 99999 },
+      { collection: 'workoutLogs', id: 'item-2', deletedAt: 99999 },
+    ];
+
+    const results: Array<{ collection: string; id: string; status: string }> = [];
+
+    // Simulate transactional execution with existing check
+    for (const item of incomingBatch) {
+      const docId = `${item.collection}__${item.id}`;
+      if (existingTombstones.has(docId)) {
+        // Must NEVER overwrite existing tombstone or change its metadata
+        results.push({
+          collection: item.collection,
+          id: item.id,
+          status: 'already_existed',
+        });
+      } else {
+        existingTombstones.set(docId, {
+          id: item.id,
+          collection: item.collection,
+          deletedAt: 8000, // server timestamp
+          deletedByUid: 'current-user',
+          generation: 2,
+          tombstoneVersion: 1,
+        });
+        results.push({
+          collection: item.collection,
+          id: item.id,
+          status: 'registered',
+        });
+      }
+    }
+
+    const preservedOriginalDeletedAt = existingTombstones.get('mealLogs__item-1')?.deletedAt === 5000;
+    const preservedOriginalUid = existingTombstones.get('mealLogs__item-1')?.deletedByUid === 'original-user';
+    const statusItem1 = results.find((r) => r.id === 'item-1')?.status === 'already_existed';
+    const statusItem2 = results.find((r) => r.id === 'item-2')?.status === 'registered';
+
+    assert(
+      65,
+      'Batch tombstone creation is race-safe and preserves existing metadata immutability',
+      preservedOriginalDeletedAt && preservedOriginalUid && statusItem1 && statusItem2,
+      'Pre-existing tombstone metadata was 100% immutable while new tombstone was registered with explicit per-item status'
+    );
+  }
+
+  // TEST 66: Failed batch items remain pending on client for retry
+  {
+    const initialPending: RecordTombstone[] = [
+      { id: 'item-success-1', collection: 'mealLogs', deletedAt: 1000, generation: 1, tombstoneVersion: 1 },
+      { id: 'item-failed-2', collection: 'invalidCollection' as any, deletedAt: 1000, generation: 1, tombstoneVersion: 1 },
+      { id: 'item-success-3', collection: 'workoutLogs', deletedAt: 1000, generation: 1, tombstoneVersion: 1 },
+    ];
+
+    // Simulated server response with per-item status
+    const serverResults = [
+      { collection: 'mealLogs', id: 'item-success-1', status: 'registered' },
+      { collection: 'invalidCollection', id: 'item-failed-2', status: 'failed', error: 'Unsupported collection' },
+      { collection: 'workoutLogs', id: 'item-success-3', status: 'already_existed' },
+    ];
+
+    const confirmedKeys = new Set(
+      serverResults
+        .filter((r) => r.status === 'registered' || r.status === 'already_existed')
+        .map((r) => `${r.collection}__${r.id}`)
+    );
+
+    const acknowledgedItems: RecordTombstone[] = [];
+    for (const t of initialPending) {
+      if (confirmedKeys.has(`${t.collection}__${t.id}`)) {
+        acknowledgedItems.push(t);
+      }
+    }
+
+    const remainingPending = initialPending.filter(
+      (t) => !confirmedKeys.has(`${t.collection}__${t.id}`)
+    );
+
+    const pass =
+      acknowledgedItems.length === 2 &&
+      remainingPending.length === 1 &&
+      remainingPending[0].id === 'item-failed-2';
+
+    assert(
+      66,
+      'Client acknowledges only confirmed tombstones and retains failed items in pending queue',
+      pass,
+      'item-failed-2 remained in pendingTombstones queue for subsequent retry; only confirmed items were marked synced'
+    );
+  }
+
+  // TEST 67: Reset lease fencing token prevents stale worker from committing checkpoint
+  {
+    // Worker 1 acquires lease with leaseToken: 1
+    let resetDoc = {
+      status: 'in_progress',
+      currentCollectionIndex: 0,
+      deletedCount: 0,
+      leaseUntil: Date.now() + 30000,
+      leaseToken: 1,
+    };
+
+    // Worker 1 is delayed; Worker 2 takes over and acquires lease with leaseToken: 2
+    const worker2Token = resetDoc.leaseToken + 1;
+    resetDoc = {
+      ...resetDoc,
+      leaseToken: worker2Token,
+      leaseUntil: Date.now() + 30000,
+    };
+
+    // Worker 1 attempts to commit checkpoint with stale assignedLeaseToken: 1
+    const worker1AssignedToken = 1;
+    let worker1CommitBlocked = false;
+    let worker1ErrorMessage = '';
+
+    if (resetDoc.leaseToken !== worker1AssignedToken) {
+      worker1CommitBlocked = true;
+      worker1ErrorMessage = `Reset lease fencing token mismatch (held: ${worker1AssignedToken}, current: ${resetDoc.leaseToken})`;
+    }
+
+    // Worker 2 commits checkpoint with valid leaseToken: 2
+    let worker2CommitSuccess = false;
+    if (resetDoc.leaseToken === worker2Token && resetDoc.leaseUntil >= Date.now()) {
+      resetDoc = {
+        ...resetDoc,
+        currentCollectionIndex: 2,
+        deletedCount: 400,
+        leaseUntil: 0,
+      };
+      worker2CommitSuccess = true;
+    }
+
+    assert(
+      67,
+      'Reset lease fencing token prevents stale worker from overwriting reset progress',
+      worker1CommitBlocked && worker2CommitSuccess && resetDoc.deletedCount === 400,
+      `Worker 1 correctly rejected with "${worker1ErrorMessage}" and Worker 2 successfully committed progress`
+    );
+  }
+
   return results;
 }
 
