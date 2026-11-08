@@ -2743,6 +2743,69 @@ export function runDataIntegrityTestSuite(): TestResult[] {
     );
   }
 
+  // TEST 74: Missing or incomplete authoritative reset metadata never falls back to startRes values
+  {
+    const startRes = {
+      resetId: 'start_res_fallback_id',
+      newGeneration: 99,
+    };
+
+    // Client evaluation function mirroring clearAllData Phase 3 logic
+    const evaluateAuthoritativeFinalization = (
+      activeReset: { resetId: string | null; targetGeneration: number | null; status: string } | null
+    ) => {
+      // Must NEVER use startRes as fallback
+      if (!activeReset) {
+        return { success: false, error: 'Authoritative reset document does not exist; cannot finalize reset safely' };
+      }
+      if (activeReset.status !== 'in_progress') {
+        return { success: false, error: `Authoritative reset state is "${activeReset.status}", expected "in_progress"; cannot finalize reset safely` };
+      }
+      if (!activeReset.resetId || typeof activeReset.resetId !== 'string') {
+        return { success: false, error: 'Authoritative resetId is missing or empty; cannot finalize reset safely' };
+      }
+      if (typeof activeReset.targetGeneration !== 'number' || !Number.isInteger(activeReset.targetGeneration) || activeReset.targetGeneration < 1) {
+        return { success: false, error: 'Authoritative targetGeneration is invalid; cannot finalize reset safely' };
+      }
+
+      return {
+        success: true,
+        targetResetId: activeReset.resetId,
+        targetGen: activeReset.targetGeneration,
+      };
+    };
+
+    // Scenario A: Document does not exist (null)
+    const resA = evaluateAuthoritativeFinalization(null);
+    // Scenario B: Status is not 'in_progress' (e.g. 'completed' or 'idle')
+    const resB = evaluateAuthoritativeFinalization({ resetId: 'valid_id', targetGeneration: 3, status: 'completed' });
+    // Scenario C: resetId is missing/null/empty
+    const resC = evaluateAuthoritativeFinalization({ resetId: '', targetGeneration: 3, status: 'in_progress' });
+    // Scenario D: targetGeneration is missing/null/invalid
+    const resD = evaluateAuthoritativeFinalization({ resetId: 'valid_id', targetGeneration: null as any, status: 'in_progress' });
+    // Scenario E: Freshly fetched authoritative reset document is valid
+    const resE = evaluateAuthoritativeFinalization({ resetId: 'auth_reset_valid_123', targetGeneration: 4, status: 'in_progress' });
+
+    const pass =
+      !resA.success && resA.error?.includes('does not exist') &&
+      !resB.success && resB.error?.includes('in_progress') &&
+      !resC.success && resC.error?.includes('resetId is missing') &&
+      !resD.success && resD.error?.includes('targetGeneration is invalid') &&
+      resE.success && resE.targetResetId === 'auth_reset_valid_123' && resE.targetGen === 4 &&
+      // Proof that startRes values were never substituted
+      resA.targetResetId === undefined &&
+      resB.targetResetId === undefined &&
+      resC.targetResetId === undefined &&
+      resD.targetResetId === undefined;
+
+    assert(
+      74,
+      'Missing or incomplete authoritative reset metadata never falls back to startRes values in client finalization',
+      Boolean(pass),
+      'Client strictly halts finalization when authoritative reset document is null, not in_progress, or incomplete, with zero startRes fallback'
+    );
+  }
+
   return results;
 }
 

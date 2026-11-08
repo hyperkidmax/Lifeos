@@ -982,14 +982,25 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
         }
 
         // Phase 3: Verification with authoritative reset state
-        // Obtain expectedResetId and expectedGeneration directly from the authoritative reset state
+        // Obtain expectedResetId and expectedGeneration strictly from the freshly fetched authoritative reset document.
+        // Never fall back to startRes values: verify that the document exists, is in_progress, and contains valid metadata.
         const activeReset = await getActiveResetStateFromCloud(currentUser.uid);
-        const targetResetId = activeReset?.resetId || startRes.resetId;
-        const targetGen = activeReset?.targetGeneration || startRes.newGeneration;
 
-        if (!targetResetId || typeof targetGen !== 'number') {
-          throw new Error('Authoritative reset metadata is unavailable; cannot finalize reset safely');
+        if (!activeReset) {
+          throw new Error('Authoritative reset document does not exist; cannot finalize reset safely');
         }
+        if (activeReset.status !== 'in_progress') {
+          throw new Error(`Authoritative reset state is "${activeReset.status}", expected "in_progress"; cannot finalize reset safely`);
+        }
+        if (!activeReset.resetId || typeof activeReset.resetId !== 'string') {
+          throw new Error('Authoritative resetId is missing or empty; cannot finalize reset safely');
+        }
+        if (typeof activeReset.targetGeneration !== 'number' || !Number.isInteger(activeReset.targetGeneration) || activeReset.targetGeneration < 1) {
+          throw new Error('Authoritative targetGeneration is invalid; cannot finalize reset safely');
+        }
+
+        const targetResetId = activeReset.resetId;
+        const targetGen = activeReset.targetGeneration;
 
         const verifyRes = await verifyAndFinalizeResetViaCloudFunction(targetResetId, targetGen);
         if (!verifyRes.success) {
