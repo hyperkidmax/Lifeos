@@ -110,6 +110,44 @@ export const startGlobalReset = onCall({ region: 'asia-northeast1' }, async (req
   };
 });
 
+// Helper: Testable transactional checkpoint commit with lease fencing token verification.
+// Verifies that a worker's leaseToken is still valid and unexpired before modifying checkpoint or reset metadata.
+export async function commitResetCheckpointTx(
+  db: FirebaseFirestore.Firestore,
+  uid: string,
+  assignedLeaseToken: number,
+  colIndex: number,
+  totalDeleted: number
+): Promise<void> {
+  const resetRef = db.doc(`users/${uid}/meta/reset`);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(resetRef);
+    if (!snap.exists) {
+      throw new HttpsError('aborted', 'Reset state document was deleted');
+    }
+    const cur = snap.data()!;
+    if (cur.leaseToken !== assignedLeaseToken) {
+      throw new HttpsError(
+        'aborted',
+        `Reset lease fencing token mismatch (held: ${assignedLeaseToken}, current: ${cur.leaseToken}); another worker took over`
+      );
+    }
+    if (cur.leaseUntil < Date.now()) {
+      throw new HttpsError(
+        'deadline-exceeded',
+        'Reset execution lease expired before checkpoint could be committed'
+      );
+    }
+
+    tx.update(resetRef, {
+      currentCollectionIndex: colIndex,
+      deletedCount: totalDeleted,
+      leaseUntil: 0,
+      lastChunkProcessedAt: FieldValue.serverTimestamp(),
+    });
+  });
+}
+
 // 3. Execute Reset Chunk: Transactional lease locking, fencing token validation, checkpointing, preserving tombstones
 export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (request) => {
   const uid = request.auth?.uid;
@@ -203,32 +241,7 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
 
     // Fencing token verification: Transactionally verify this worker still holds the valid leaseToken
     // before committing checkpoint and releasing the lease
-    await adminDb.runTransaction(async (tx) => {
-      const snap = await tx.get(resetRef);
-      if (!snap.exists) {
-        throw new HttpsError('aborted', 'Reset state document was deleted');
-      }
-      const cur = snap.data()!;
-      if (cur.leaseToken !== assignedLeaseToken) {
-        throw new HttpsError(
-          'aborted',
-          `Reset lease fencing token mismatch (held: ${assignedLeaseToken}, current: ${cur.leaseToken}); another worker took over`
-        );
-      }
-      if (cur.leaseUntil < Date.now()) {
-        throw new HttpsError(
-          'deadline-exceeded',
-          'Reset execution lease expired before checkpoint could be committed'
-        );
-      }
-
-      tx.update(resetRef, {
-        currentCollectionIndex: colIndex,
-        deletedCount: totalDeleted,
-        leaseUntil: 0,
-        lastChunkProcessedAt: FieldValue.serverTimestamp(),
-      });
-    });
+    await commitResetCheckpointTx(adminDb, uid, assignedLeaseToken, colIndex, totalDeleted);
 
     return {
       success: true,

@@ -4,4 +4,5 @@ export {
   startGlobalReset,
   executeResetChunk,
   verifyAndFinalizeReset,
+  commitResetCheckpointTx,
 } from './reset.js';

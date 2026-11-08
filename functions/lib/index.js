@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.verifyAndFinalizeReset = exports.executeResetChunk = exports.startGlobalReset = exports.getSyncGeneration = exports.batchRecordTombstones = exports.deleteRecord = void 0;
+exports.commitResetCheckpointTx = exports.verifyAndFinalizeReset = exports.executeResetChunk = exports.startGlobalReset = exports.getSyncGeneration = exports.batchRecordTombstones = exports.deleteRecord = void 0;
 var tombstones_js_1 = require("./tombstones.js");
 Object.defineProperty(exports, "deleteRecord", { enumerable: true, get: function () { return tombstones_js_1.deleteRecord; } });
 Object.defineProperty(exports, "batchRecordTombstones", { enumerable: true, get: function () { return tombstones_js_1.batchRecordTombstones; } });
@@ -9,4 +9,5 @@ Object.defineProperty(exports, "getSyncGeneration", { enumerable: true, get: fun
 Object.defineProperty(exports, "startGlobalReset", { enumerable: true, get: function () { return reset_js_1.startGlobalReset; } });
 Object.defineProperty(exports, "executeResetChunk", { enumerable: true, get: function () { return reset_js_1.executeResetChunk; } });
 Object.defineProperty(exports, "verifyAndFinalizeReset", { enumerable: true, get: function () { return reset_js_1.verifyAndFinalizeReset; } });
+Object.defineProperty(exports, "commitResetCheckpointTx", { enumerable: true, get: function () { return reset_js_1.commitResetCheckpointTx; } });
 //# sourceMappingURL=index.js.map

@@ -137,10 +137,8 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
   const syncRef = adminDb.doc(`users/${uid}/meta/sync`);
   const resetRef = adminDb.doc(`users/${uid}/meta/reset`);
 
-  // Validate items up-front while tracking per-item status
-  const results: BatchTombstoneItemResult[] = [];
-
   interface ValidatedItem {
+    inputIndex: number;
     rawCollection: string;
     rawId: string;
     cleanId: string;
@@ -150,42 +148,50 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
 
   const validated: ValidatedItem[] = [];
 
-  for (const item of items) {
+  // Process validated items in atomic, transactional chunks of up to 100 items (200 ops per transaction <= 500 limit).
+  // CRITICAL CONCURRENCY FIX: Read reset status and server sync generation INSIDE EACH TRANSACTION.
+  // This guarantees that if a global reset starts while a batch is in flight, the transaction immediately
+  // detects reset status === 'in_progress', aborts tombstone creation, and prevents stale generation writes.
+  // NOTE: Pre-allocate results array by input index to preserve strict input ordering across all items.
+  const results: BatchTombstoneItemResult[] = new Array(items.length);
+
+  // Fill in already-failed items
+  for (let idx = 0; idx < items.length; idx++) {
+    const item = items[idx];
     if (!item || typeof item !== 'object') {
-      results.push({
+      results[idx] = {
         collection: (item as any)?.collection || 'unknown',
         id: (item as any)?.id || 'unknown',
         status: 'failed',
         error: 'Item is not an object',
-      });
-      continue;
-    }
-    if (!item.collection || !SUPPORTED_COLLECTIONS.includes(item.collection as SupportedCollection)) {
-      results.push({
+      };
+    } else if (!item.collection || !SUPPORTED_COLLECTIONS.includes(item.collection as SupportedCollection)) {
+      results[idx] = {
         collection: item.collection || 'unknown',
         id: item.id || 'unknown',
         status: 'failed',
         error: `Unsupported collection: ${item.collection}`,
-      });
-      continue;
-    }
-    try {
-      const cleanId = sanitizeRecordId(item.id);
-      const tombstoneDocId = getTombstoneDocId(item.collection, cleanId);
-      validated.push({
-        rawCollection: item.collection,
-        rawId: item.id,
-        cleanId,
-        collection: item.collection as SupportedCollection,
-        tombstoneDocId,
-      });
-    } catch (e: any) {
-      results.push({
-        collection: item.collection,
-        id: item.id,
-        status: 'failed',
-        error: e.message || 'Invalid record ID',
-      });
+      };
+    } else {
+      try {
+        const cleanId = sanitizeRecordId(item.id);
+        const tombstoneDocId = getTombstoneDocId(item.collection, cleanId);
+        validated.push({
+          inputIndex: idx,
+          rawCollection: item.collection,
+          rawId: item.id,
+          cleanId,
+          collection: item.collection as SupportedCollection,
+          tombstoneDocId,
+        });
+      } catch (e: any) {
+        results[idx] = {
+          collection: item.collection,
+          id: item.id,
+          status: 'failed',
+          error: e.message || 'Invalid record ID',
+        };
+      }
     }
   }
 
@@ -193,10 +199,6 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
   let alreadyExistedCount = 0;
   let finalObservedGen = 1;
 
-  // Process validated items in atomic, transactional chunks of up to 100 items (200 ops per transaction <= 500 limit).
-  // CRITICAL CONCURRENCY FIX: Read reset status and server sync generation INSIDE EACH TRANSACTION.
-  // This guarantees that if a global reset starts while a batch is in flight, the transaction immediately
-  // detects reset status === 'in_progress', aborts tombstone creation, and prevents stale generation writes.
   const CHUNK_SIZE = 100;
   for (let i = 0; i < validated.length; i += CHUNK_SIZE) {
     const chunk = validated.slice(i, i + CHUNK_SIZE);
@@ -220,7 +222,7 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
         const tombstoneRefs = chunk.map((v) => adminDb.doc(`users/${uid}/tombstones/${v.tombstoneDocId}`));
         const tombstoneSnaps = await tx.getAll(...tombstoneRefs);
 
-        const subResults: BatchTombstoneItemResult[] = [];
+        const subResults: { inputIndex: number; res: BatchTombstoneItemResult }[] = [];
 
         chunk.forEach((v, idx) => {
           const snap = tombstoneSnaps[idx];
@@ -232,9 +234,12 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
             // Ensure record document is deleted (idempotent purge)
             tx.delete(recordRef);
             subResults.push({
-              collection: v.rawCollection,
-              id: v.rawId,
-              status: 'already_existed',
+              inputIndex: v.inputIndex,
+              res: {
+                collection: v.rawCollection,
+                id: v.rawId,
+                status: 'already_existed',
+              },
             });
           } else {
             // Create brand new immutable tombstone with transactionally locked currentGen
@@ -248,9 +253,12 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
             });
             tx.delete(recordRef);
             subResults.push({
-              collection: v.rawCollection,
-              id: v.rawId,
-              status: 'registered',
+              inputIndex: v.inputIndex,
+              res: {
+                collection: v.rawCollection,
+                id: v.rawId,
+                status: 'registered',
+              },
             });
           }
         });
@@ -258,20 +266,20 @@ export const batchRecordTombstones = onCall({ region: 'asia-northeast1' }, async
         return subResults;
       });
 
-      for (const res of chunkResults) {
-        results.push(res);
-        if (res.status === 'registered') registeredCount++;
-        else if (res.status === 'already_existed') alreadyExistedCount++;
+      for (const itemResult of chunkResults) {
+        results[itemResult.inputIndex] = itemResult.res;
+        if (itemResult.res.status === 'registered') registeredCount++;
+        else if (itemResult.res.status === 'already_existed') alreadyExistedCount++;
       }
     } catch (chunkError: any) {
       // If reset is in progress or transaction failed, mark every item in this chunk as failed for client retry
       for (const v of chunk) {
-        results.push({
+        results[v.inputIndex] = {
           collection: v.rawCollection,
           id: v.rawId,
           status: 'failed',
           error: chunkError.message || String(chunkError),
-        });
+        };
       }
     }
   }

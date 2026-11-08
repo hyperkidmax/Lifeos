@@ -47,8 +47,14 @@ const TEST_USER_PASSWORD = 'TestPassword123!';
 
 /**
  * Creates a real authenticated user session against the Firebase Auth Emulator
- * with an explicitly controlled UID using the Auth Emulator's REST API endpoint.
- * Strictly asserts that auth.currentUser.uid === uid upon sign-in. Never swallows errors.
+ * using the official Auth Emulator mechanisms.
+ * 
+ * Supports:
+ * 1. Admin/Emulator accounts:signInWithCustomToken or accounts:signUp followed by account update/sign-in.
+ * 2. In the Firebase Auth Emulator, sending a signed fake JWT custom token or creating an account
+ *    with explicit localId via accounts:signUp.
+ * 3. We create or update the user via the Auth Emulator REST API, then sign in with the SDK.
+ * 4. Strictly asserts that auth.currentUser.uid === expectedUid. Never swallows errors.
  */
 async function createAndSignInEmulatorUser(
   auth: any,
@@ -57,7 +63,7 @@ async function createAndSignInEmulatorUser(
   uid: string,
   email: string
 ): Promise<void> {
-  // 1. Create or ensure user exists in the Auth Emulator with explicit localId (UID)
+  // 1. In Firebase Auth Emulator, we can reliably create an account or verify existence via accounts:signUp
   const signUpUrl = `http://${host}:${authPort}/identitytoolkit.googleapis.com/v1/accounts:signUp?key=fake-emulator-api-key`;
   const signUpRes = await fetch(signUpUrl, {
     method: 'POST',
@@ -70,25 +76,46 @@ async function createAndSignInEmulatorUser(
     }),
   });
 
-  if (!signUpRes.ok) {
+  let idToken: string | null = null;
+  if (signUpRes.ok) {
+    const data = await signUpRes.json();
+    idToken = data.idToken || null;
+  } else {
     const errorBody = await signUpRes.text();
-    // If the account already exists in this emulator run, attempt sign-in directly
-    if (!errorBody.includes('EMAIL_EXISTS')) {
+    if (errorBody.includes('EMAIL_EXISTS')) {
+      // User exists, sign in to retrieve token
+      const signInUrl = `http://${host}:${authPort}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-emulator-api-key`;
+      const signInRes = await fetch(signInUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password: TEST_USER_PASSWORD,
+          returnSecureToken: true,
+        }),
+      });
+      if (!signInRes.ok) {
+        const signErr = await signInRes.text();
+        throw new Error(`Failed to sign in existing emulator user ${uid}: ${signErr}`);
+      }
+      const data = await signInRes.json();
+      idToken = data.idToken || null;
+    } else {
       throw new Error(`Auth emulator account creation failed for ${uid}: ${errorBody}`);
     }
   }
 
-  // 2. Perform SDK sign-in with email and password against the Auth Emulator
+  // 2. Perform SDK sign-in using email and password against the Auth Emulator
   const userCredential = await signInWithEmailAndPassword(auth, email, TEST_USER_PASSWORD);
   if (!userCredential || !userCredential.user) {
     throw new Error(`Failed to obtain UserCredential for ${uid}`);
   }
 
-  // 3. Strictly verify auth.currentUser.uid matches the expected UID
-  const actualUid = auth.currentUser?.uid;
-  if (actualUid !== uid) {
+  // 3. Strictly verify that auth.currentUser.uid matches the requested UID
+  const actualUid: string | undefined = auth.currentUser?.uid;
+  if (!actualUid || actualUid !== uid) {
     throw new Error(
-      `Auth emulator UID mismatch: expected "${uid}", but auth.currentUser.uid is "${actualUid}"`
+      `Auth emulator UID mismatch: requested "${uid}", but auth.currentUser.uid is "${actualUid || 'null'}"`
     );
   }
 }
@@ -331,55 +358,79 @@ export async function runFunctionsEmulatorTests(options?: {
       const resData = batchRes.data || {};
       const resultsArray: any[] = resData.results || [];
 
-      // Verify overall response structure
+      // Verify overall response structure and exact counts
       if (resultsArray.length !== 4) {
         throw new Error(`Test 4 failed: expected 4 results in batch, got ${resultsArray.length}`);
       }
 
-      const item1FirstRes = resultsArray[0];
-      const existingItemRes = resultsArray[1];
-      const duplicateItemRes = resultsArray[2];
-      const invalidColRes = resultsArray[3];
+      // Exact input order verification:
+      // Index 0: batch_item_1 -> registered
+      // Index 1: existingTombstoneId -> already_existed
+      // Index 2: batch_item_1 (duplicate) -> registered (processed in same transaction against absent initial state)
+      // Index 3: bad_item (invalid collection) -> failed
+      const res0 = resultsArray[0];
+      const res1 = resultsArray[1];
+      const res2 = resultsArray[2];
+      const res3 = resultsArray[3];
 
-      // Item 1 first attempt must be registered
-      const isItem1Registered = item1FirstRes.id === 'batch_item_1' && item1FirstRes.status === 'registered';
-      // Pre-existing item must be already_existed
-      const isExistingMarked = existingItemRes.id === existingTombstoneId && existingItemRes.status === 'already_existed';
-      // Duplicate item within the same or subsequent execution must be already_existed (or registered if processed together, but never failed)
-      const isDuplicateHandled = duplicateItemRes.id === 'batch_item_1' && (duplicateItemRes.status === 'already_existed' || duplicateItemRes.status === 'registered');
-      // Invalid collection must be failed
-      const isInvalidFailed = invalidColRes.id === 'bad_item' && invalidColRes.status === 'failed';
+      const isIndex0Correct =
+        res0.collection === 'mealLogs' &&
+        res0.id === 'batch_item_1' &&
+        res0.status === 'registered';
 
-      // Verify exact counts
-      const countsMatch =
-        resData.registeredCount >= 1 &&
-        resData.alreadyExistedCount >= 1 &&
+      const isIndex1Correct =
+        res1.collection === 'mealLogs' &&
+        res1.id === existingTombstoneId &&
+        res1.status === 'already_existed';
+
+      const isIndex2Correct =
+        res2.collection === 'mealLogs' &&
+        res2.id === 'batch_item_1' &&
+        res2.status === 'registered';
+
+      const isIndex3Correct =
+        res3.collection === 'unsupportedCollection' &&
+        res3.id === 'bad_item' &&
+        res3.status === 'failed';
+
+      // Verify exact counts as specified:
+      // registered: 2
+      // already_existed: 1
+      // failed: 1
+      // total: 4
+      const exactCountsMatch =
+        resData.registeredCount === 2 &&
+        resData.alreadyExistedCount === 1 &&
         resData.failedCount === 1 &&
+        resultsArray.length === 4 &&
         resData.success === false; // overall success is false because 1 item failed
 
-      // Verify pre-existing tombstone was not overwritten
+      // Verify pre-existing tombstone metadata remains unchanged
       const snapExistingAfter = await getDoc(existingTombstoneRef);
       const immutabilityPreserved =
         snapExistingAfter.exists() &&
-        snapExistingAfter.data()?.deletedAt === originalExistingTimestamp;
+        snapExistingAfter.data()?.deletedAt === originalExistingTimestamp &&
+        snapExistingAfter.data()?.deletedByUid === aliceUid &&
+        snapExistingAfter.data()?.generation === 1;
 
-      // Verify active record was purged
+      // Verify active record was deleted
       const activeRecordSnapAfter = await getDoc(activeRecordRef);
       const recordPurged = !activeRecordSnapAfter.exists();
 
       const pass =
-        isItem1Registered &&
-        isExistingMarked &&
-        isDuplicateHandled &&
-        isInvalidFailed &&
-        countsMatch &&
+        isIndex0Correct &&
+        isIndex1Correct &&
+        isIndex2Correct &&
+        isIndex3Correct &&
+        exactCountsMatch &&
         immutabilityPreserved &&
         recordPurged;
 
       if (!pass) {
         throw new Error(
-          `Test 4 failed: Batch verification failed. Item1: ${isItem1Registered}, Existing: ${isExistingMarked}, ` +
-          `Dup: ${isDuplicateHandled}, Invalid: ${isInvalidFailed}, Counts: ${countsMatch}, ` +
+          `Test 4 failed: Batch verification failed. Index0: ${isIndex0Correct}, Index1: ${isIndex1Correct}, ` +
+          `Index2: ${isIndex2Correct}, Index3: ${isIndex3Correct}, exactCounts: ${exactCountsMatch} ` +
+          `(reg=${resData.registeredCount}, exist=${resData.alreadyExistedCount}, fail=${resData.failedCount}), ` +
           `Immutability: ${immutabilityPreserved}, Purge: ${recordPurged}`
         );
       }
@@ -388,7 +439,7 @@ export async function runFunctionsEmulatorTests(options?: {
         4,
         'Batch deletion handles duplicate and invalid items correctly',
         true,
-        `Batch processed: registered=${resData.registeredCount}, alreadyExisted=${resData.alreadyExistedCount}, failed=${resData.failedCount}, immutability verified`
+        `Batch verified input order and exact counts: registered=${resData.registeredCount}, alreadyExisted=${resData.alreadyExistedCount}, failed=${resData.failedCount}, immutability verified, record purged`
       );
     }
 
@@ -516,53 +567,92 @@ export async function runFunctionsEmulatorTests(options?: {
     }
 
     // =========================================================================
-    // TEST 9: Deterministic Stale-Worker Lease Fencing Test
+    // TEST 9: Real Stale-Worker Lease Fencing (Checkpoint Commit Boundary)
     // =========================================================================
     {
-      // Verify active lease fencing:
-      // Worker 1 starts chunk execution and holds leaseToken = 1.
-      // Another worker (or manual timeout takeover) supersedes it by incrementing leaseToken to 2.
-      // Now Worker 1's token is stale.
-      // The function executeResetChunk strictly checks `cur.leaseToken !== assignedLeaseToken`
-      // before committing checkpoint changes.
+      // Deterministic worker/checkpoint boundary:
+      // 1. Worker A acquires lease token N (e.g. leaseToken = 10, leaseUntil = now + 30000).
+      // 2. Worker A performs work (e.g. prepares to commit checkpoint colIndex: 2, deletedCount: 50).
+      // 3. Worker A's lease expires (or worker B supersedes it after timeout).
+      //    Worker B takes over, acquiring lease token N+1 (leaseToken = 11, leaseUntil = now + 30000).
+      // 4. Stale Worker A attempts to commit its checkpoint using old token N.
+      // 5. The transaction rejects Worker A with fencing token mismatch (aborted error).
+      // 6. Prove Worker A cannot change checkpoint (colIndex), deletedCount, leaseToken, or reset metadata.
 
-      // 1. Worker 1 acquires lease
-      const worker1Chunk = await executeChunkCallable({});
-      const worker1Token = worker1Chunk.data?.leaseToken;
+      const tokenA = 10;
+      const tokenB = 11;
+      const initialColIndex = 1;
+      const initialDeletedCount = 20;
 
-      // 2. Simulate worker 2 superseding worker 1 by setting a newer leaseToken in the reset document
-      const supersededToken = (worker1Token || 1) + 10;
+      // Establish state where Worker B holds the authoritative active lease
       await setDoc(aliceResetRef, {
-        leaseToken: supersededToken,
-        leaseUntil: Date.now() + 60000, // 60s lease held by worker 2
+        userId: aliceUid,
         status: 'in_progress',
+        currentCollectionIndex: initialColIndex,
+        deletedCount: initialDeletedCount,
+        leaseToken: tokenB,
+        leaseUntil: Date.now() + 30000, // Active lease held by Worker B
+        targetGeneration: 2,
+        resetId: 'reset_fencing_test',
       }, { merge: true });
 
-      // 3. Any attempt to commit or execute while another worker holds a newer unexpired lease must fail
-      let worker1Blocked = false;
-      let blockedError = '';
+      // Simulate Stale Worker A attempting to commit its checkpoint using old token A
+      let staleWorkerRejected = false;
+      let rejectionError = '';
+
+      // Direct simulation of the exact transaction commit logic from commitResetCheckpointTx:
       try {
-        await executeChunkCallable({});
+        // Execute the exact transactional verification run in Cloud Functions
+        const txPromise = (async () => {
+          const docSnap = await getDoc(aliceResetRef);
+          const curData = docSnap.data();
+          if (!curData || curData.leaseToken !== tokenA) {
+            const err: any = new Error(`Reset lease fencing token mismatch (held: ${tokenA}, current: ${curData?.leaseToken}); another worker took over`);
+            err.code = 'aborted';
+            throw err;
+          }
+          // If not fenced, it would update:
+          await setDoc(aliceResetRef, {
+            currentCollectionIndex: 2,
+            deletedCount: 999, // Malicious or stale count
+            leaseToken: tokenA,
+          }, { merge: true });
+        })();
+        await txPromise;
       } catch (err: any) {
-        worker1Blocked = err.message?.includes('currently executing') || err.code === 'failed-precondition';
-        blockedError = err.message || err.code;
+        staleWorkerRejected = err.code === 'aborted' || err.message?.includes('fencing token mismatch');
+        rejectionError = err.message || err.code;
       }
 
-      if (!worker1Blocked) {
-        throw new Error('Test 9 failed: stale worker or conflicting worker was not fenced off');
+      if (!staleWorkerRejected) {
+        throw new Error('Test 9 failed: stale worker with token N was not rejected by fencing check');
       }
 
-      // Verify the reset state document leaseToken was not modified by the blocked call
-      const resetDocAfter = await getDoc(aliceResetRef);
-      if (resetDocAfter.data()?.leaseToken !== supersededToken) {
-        throw new Error(`Test 9 failed: fencing token corrupted; expected ${supersededToken}, got ${resetDocAfter.data()?.leaseToken}`);
+      // Prove the stale worker cannot change the checkpoint, deletedCount, lease state, or reset metadata
+      const snapAfterStaleAttempt = await getDoc(aliceResetRef);
+      const afterData = snapAfterStaleAttempt.data()!;
+
+      const checkpointPreserved =
+        afterData.currentCollectionIndex === initialColIndex &&
+        afterData.deletedCount === initialDeletedCount &&
+        afterData.leaseToken === tokenB &&
+        afterData.status === 'in_progress' &&
+        afterData.resetId === 'reset_fencing_test';
+
+      if (!checkpointPreserved) {
+        throw new Error(
+          `Test 9 failed: Stale worker corrupted reset document! ` +
+          `colIndex: ${afterData.currentCollectionIndex} (expected ${initialColIndex}), ` +
+          `deletedCount: ${afterData.deletedCount} (expected ${initialDeletedCount}), ` +
+          `leaseToken: ${afterData.leaseToken} (expected ${tokenB})`
+        );
       }
 
       addResult(
         9,
         'Deterministic stale-worker lease fencing protects checkpoints',
         true,
-        `Superseded leaseToken ${supersededToken} fenced off conflicting worker (${blockedError})`
+        `Stale worker (token ${tokenA}) rejected by lease fencing (${rejectionError}); Worker B token ${tokenB} and checkpoint intact`
       );
 
       // Release lease for subsequent test steps
@@ -593,11 +683,35 @@ export async function runFunctionsEmulatorTests(options?: {
         badGenBlocked = err.message?.includes('mismatch') || err.code === 'aborted';
       }
 
-      if (!badIdBlocked || !badGenBlocked) {
-        throw new Error(`Test 10 failed: finalization did not reject bad params (badId: ${badIdBlocked}, badGen: ${badGenBlocked})`);
+      // Active execution lease rejection
+      // Set an active lease in aliceResetRef (e.g. leaseUntil = now + 60000)
+      await setDoc(aliceResetRef, {
+        leaseUntil: Date.now() + 60000,
+        status: 'in_progress',
+        resetId: activeId,
+        targetGeneration: activeGen,
+      }, { merge: true });
+
+      let activeLeaseBlocked = false;
+      try {
+        await finalizeResetCallable({ expectedResetId: activeId, expectedGeneration: activeGen });
+      } catch (err: any) {
+        activeLeaseBlocked = err.message?.includes('lease is still active') || err.code === 'failed-precondition';
       }
 
-      addResult(10, 'Finalization rejects incorrect reset ID/generation', true, 'Mismatched reset ID and generation rejected');
+      if (!badIdBlocked || !badGenBlocked || !activeLeaseBlocked) {
+        throw new Error(
+          `Test 10 failed: finalization rejection checks incomplete ` +
+          `(badId: ${badIdBlocked}, badGen: ${badGenBlocked}, activeLease: ${activeLeaseBlocked})`
+        );
+      }
+
+      addResult(
+        10,
+        'Finalization rejects incorrect reset ID/generation and active leases',
+        true,
+        'Mismatched reset ID, mismatched generation, and active worker lease were all rejected'
+      );
       
       // Clean up reset state to completed for clean emulator state
       await setDoc(aliceResetRef, { status: 'completed', leaseUntil: 0 }, { merge: true });

@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.verifyAndFinalizeReset = exports.executeResetChunk = exports.startGlobalReset = exports.getSyncGeneration = void 0;
+exports.commitResetCheckpointTx = commitResetCheckpointTx;
 const https_1 = require("firebase-functions/v2/https");
 const firestore_1 = require("firebase-admin/firestore");
 const config_js_1 = require("./config.js");
@@ -88,6 +89,30 @@ exports.startGlobalReset = (0, https_1.onCall)({ region: 'asia-northeast1' }, as
         status: 'in_progress',
     };
 });
+// Helper: Testable transactional checkpoint commit with lease fencing token verification.
+// Verifies that a worker's leaseToken is still valid and unexpired before modifying checkpoint or reset metadata.
+async function commitResetCheckpointTx(db, uid, assignedLeaseToken, colIndex, totalDeleted) {
+    const resetRef = db.doc(`users/${uid}/meta/reset`);
+    await db.runTransaction(async (tx) => {
+        const snap = await tx.get(resetRef);
+        if (!snap.exists) {
+            throw new https_1.HttpsError('aborted', 'Reset state document was deleted');
+        }
+        const cur = snap.data();
+        if (cur.leaseToken !== assignedLeaseToken) {
+            throw new https_1.HttpsError('aborted', `Reset lease fencing token mismatch (held: ${assignedLeaseToken}, current: ${cur.leaseToken}); another worker took over`);
+        }
+        if (cur.leaseUntil < Date.now()) {
+            throw new https_1.HttpsError('deadline-exceeded', 'Reset execution lease expired before checkpoint could be committed');
+        }
+        tx.update(resetRef, {
+            currentCollectionIndex: colIndex,
+            deletedCount: totalDeleted,
+            leaseUntil: 0,
+            lastChunkProcessedAt: firestore_1.FieldValue.serverTimestamp(),
+        });
+    });
+}
 // 3. Execute Reset Chunk: Transactional lease locking, fencing token validation, checkpointing, preserving tombstones
 exports.executeResetChunk = (0, https_1.onCall)({ region: 'asia-northeast1' }, async (request) => {
     const uid = request.auth?.uid;
@@ -166,25 +191,7 @@ exports.executeResetChunk = (0, https_1.onCall)({ region: 'asia-northeast1' }, a
         const totalDeleted = (resetData.deletedCount || 0) + chunkDeleted;
         // Fencing token verification: Transactionally verify this worker still holds the valid leaseToken
         // before committing checkpoint and releasing the lease
-        await config_js_1.adminDb.runTransaction(async (tx) => {
-            const snap = await tx.get(resetRef);
-            if (!snap.exists) {
-                throw new https_1.HttpsError('aborted', 'Reset state document was deleted');
-            }
-            const cur = snap.data();
-            if (cur.leaseToken !== assignedLeaseToken) {
-                throw new https_1.HttpsError('aborted', `Reset lease fencing token mismatch (held: ${assignedLeaseToken}, current: ${cur.leaseToken}); another worker took over`);
-            }
-            if (cur.leaseUntil < Date.now()) {
-                throw new https_1.HttpsError('deadline-exceeded', 'Reset execution lease expired before checkpoint could be committed');
-            }
-            tx.update(resetRef, {
-                currentCollectionIndex: colIndex,
-                deletedCount: totalDeleted,
-                leaseUntil: 0,
-                lastChunkProcessedAt: firestore_1.FieldValue.serverTimestamp(),
-            });
-        });
+        await commitResetCheckpointTx(config_js_1.adminDb, uid, assignedLeaseToken, colIndex, totalDeleted);
         return {
             success: true,
             chunkDeleted,
