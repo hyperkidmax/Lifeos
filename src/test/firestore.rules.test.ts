@@ -46,6 +46,14 @@ export async function runFirestoreRulesUnitTests(options?: {
   const projectId = options?.projectId || 'demo-lifeos-test';
   const databaseId = options?.databaseId || 'ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4';
 
+  // Architectural Limitation Note:
+  // In @firebase/rules-unit-testing v3, initializeTestEnvironment configures the Firestore Emulator
+  // rules for the project. The SDK's underlying compat firestore() interface targets the project's
+  // default database instance, testing all pattern matching, helper logic, schema validation,
+  // generation guards, and isolation rules of firestore.rules.
+  // The actual named database ('ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4')
+  // is directly targeted by the Cloud Functions emulator integration test suite via getFirestore(app, databaseId).
+
   const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
   const rules = fs.readFileSync(rulesPath, 'utf8');
 
