@@ -1,47 +1,52 @@
 # Firebase Emulator Integration Testing Guide for LifeOS
 
-This document outlines the setup, architecture, and step-by-step procedure for executing isolated Firebase Emulator integration testing for LifeOS.
+This document details the complete configuration, isolation architecture, and execution procedures for the LifeOS Firebase Emulator test harness.
 
 ---
 
-## 1. Emulator Architecture & Port Configuration
+## 1. Unified Isolated Test Environment Configuration
 
-LifeOS is configured in `firebase.json` to bind to the local loopback (`127.0.0.1`):
-- **Firebase Auth Emulator**: `127.0.0.1:9099`
-- **Cloud Firestore Emulator**: `127.0.0.1:8080` (Database ID: `ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4`)
-- **Cloud Functions Emulator**: `127.0.0.1:5001` (Region: `asia-northeast1`)
-- **Emulator UI**: Disabled (`"ui": { "enabled": false }`)
+All emulator test suites (Auth, Firestore Security Rules, and Cloud Functions) are strictly bound to a single, isolated test project and named database:
 
----
-
-## 2. Accidental Production Connection Prevention
-
-Production safety is enforced at the SDK initialization level:
-1. **Explicit Gate**: `src/services/firebase.ts` connects to emulators **only** when explicitly instructed via:
-   - Environment variable: `VITE_USE_FIREBASE_EMULATOR=true`
-   - Test global flag: `window.__USE_FIREBASE_EMULATOR__ = true`
-   - Process environment: `USE_FIREBASE_EMULATOR=true`
-2. **Default-to-Production Safety**: Without one of these explicit flags, all standard application builds and dev servers connect only to the designated Firebase cloud endpoints configured in `firebase-applet-config.json`.
-3. **No Localhost in Bundles**: Production Vite bundles do not contain active emulator URLs.
+- **Isolated Test Project ID**: `demo-lifeos-test`
+  *(The `demo-` prefix instructs Firebase SDKs and emulators to never contact Google Cloud or verify billing)*
+- **Firestore Named Database**: `ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4`
+- **Functions Region**: `asia-northeast1`
+- **Local Loopback Ports** (configured in `firebase.json`):
+  - **Firebase Auth Emulator**: `127.0.0.1:9099`
+  - **Cloud Firestore Emulator**: `127.0.0.1:8080`
+  - **Cloud Functions Emulator**: `127.0.0.1:5001`
+  - **Emulator UI**: Disabled (`"enabled": false`)
 
 ---
 
-## 3. Prerequisites for Running Live Emulators
+## 2. Accidental Production Contact Prevention
 
-The Firebase CLI requires the **Java Runtime Environment (JRE 11+)** to execute the local Firestore and Storage emulators:
-- Verify Java installation:
+Production safety is enforced across multiple layers:
+1. **Isolated Dummy Project**: All test runs use `demo-lifeos-test`. If any request leaves the local machine, Google Cloud production rejects `demo-*` project requests immediately.
+2. **Explicit Client Connection Gate**: In `src/services/firebase.ts`, the frontend SDK connects to local emulators only when explicitly enabled via:
+   - `VITE_USE_FIREBASE_EMULATOR=true`
+   - `window.__USE_FIREBASE_EMULATOR__ = true`
+   - `process.env.USE_FIREBASE_EMULATOR=true`
+   Standard production builds never connect to loopback ports.
+3. **Synthetic Auth**: Emulator tests use synthetic test accounts created via the local Auth Emulator REST API. No real credentials or Google OAuth tokens are ever used.
+
+---
+
+## 3. Starting the Emulators
+
+### Prerequisites
+The Firebase CLI requires the **Java Runtime Environment (JRE 11+)** to run the local Firestore and Storage emulators.
+- Check Java:
   ```bash
   java -version
   ```
-- If Java is not installed (e.g. standard Node-only container):
-  - On Debian/Ubuntu: `apt-get update && apt-get install -y default-jre`
-  - On macOS: `brew install openjdk`
+- Install if missing (Debian/Ubuntu):
+  ```bash
+  apt-get update && apt-get install -y default-jre
+  ```
 
----
-
-## 4. Starting the Firebase Emulators
-
-To start the isolated local emulator suite:
+### Start Command
 ```bash
 firebase emulators:start --only auth,firestore,functions
 ```
@@ -49,61 +54,72 @@ firebase emulators:start --only auth,firestore,functions
 Expected startup logs:
 ```
 ✔  emulators: Starting emulators: auth, firestore, functions
-✔  auth: Auth Emulator logging to auth-debug.log
 ✔  auth: Auth Emulator running at 127.0.0.1:9099
-✔  firestore: Firestore Emulator logging to firestore-debug.log
 ✔  firestore: Firestore Emulator running at 127.0.0.1:8080
-✔  functions: Functions Emulator logging to functions-debug.log
 ✔  functions: Functions Emulator running at 127.0.0.1:5001
 ```
 
 ---
 
-## 5. Running the Test Suites
+## 4. Test Suites and Execution Commands
 
-### A. Pure Unit & Invariant Test Suite (No Emulator Daemon Required)
-Runs all 74 deterministic conflict, generation, provenance, and isolation tests:
+### Suite 1: Pure Data-Integrity & Conflict-Resolution Suite (74 Tests)
+Does not require an active emulator daemon. Verifies deterministic synchronization, tombstone retention, and generation arithmetic:
 ```bash
 npm test
 # Equivalent to: npx tsx src/test/dataIntegrity.test.ts
 ```
 
-### B. Firestore Rules Unit Tests (Requires Running Firestore Emulator)
-Tests all security rules using `@firebase/rules-unit-testing`:
+### Suite 2: Executable Firestore Security Rules Tests (11 Tests)
+Requires the Firestore Emulator to be running at `127.0.0.1:8080`:
 ```bash
 npm run test:rules
 # Equivalent to: npx tsx src/test/firestore.rules.test.ts
 ```
-What it verifies:
+**Tests Verified**:
 1. Unauthenticated reads and writes are denied.
 2. Cross-user reads and writes are denied.
 3. Valid authenticated user operations are allowed.
-4. Document IDs >128 characters or containing illegal characters are rejected.
-5. Invalid schemas (negative numbers, malformed dates) are rejected.
-6. Direct client document deletes are rejected.
-7. Generation mismatch on create is rejected.
-8. Old-generation record updates are rejected.
-9. Writes are strictly blocked while global reset is `in_progress`.
-10. Writes to `/tombstones` are rejected for normal clients.
-11. Writes to `/meta/sync` and `/meta/reset` are rejected for normal clients.
+4. Invalid document IDs (>128 chars / illegal regex) rejected.
+5. Invalid data schemas (negative values, malformed dates) rejected.
+6. Direct client document deletes rejected.
+7. Generation mismatch on create rejected.
+8. Old-generation record updates rejected.
+9. Writes strictly blocked while global reset is in progress.
+10. Writes to `/tombstones` rejected for normal clients.
+11. Writes to `/meta/sync` and `/meta/reset` rejected for normal clients.
 
-### C. Cloud Functions Integration Tests (Requires Running Functions & Firestore Emulators)
-Tests callable Cloud Functions against the local runtime:
+### Suite 3: Executable Cloud Functions Integration Tests (11 Tests)
+Requires Functions, Firestore, and Auth Emulators to be running:
 ```bash
 npm run test:emulator
 # Equivalent to: npx tsx src/test/functions.emulator.test.ts
 ```
+**Tests Verified**:
+1. Unauthenticated callable requests rejected.
+2. Single deletion creates tombstone and deletes record atomically.
+3. Repeated deletion preserves original tombstone metadata.
+4. Batch deletion handles duplicate and invalid items correctly.
+5. Concurrent deletion preserves tombstone immutability.
+6. Reset prevents conflicting writes and deletions.
+7. Simultaneous reset requests are rejected.
+8. Reset resumes after interruption.
+9. Stale lease tokens cannot commit checkpoints.
+10. Finalization rejects incorrect reset ID/generation and active leases.
+11. One user cannot affect another user's data (account isolation).
 
-### D. Clear Emulator State
-Wipes all documents from the test emulator database between runs:
+### Database Cleanup Command
+Wipes all documents from the test database (`ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4` under `demo-lifeos-test`):
 ```bash
 npm run test:emulator:clean
 ```
 
 ---
 
-## 6. How to Confirm No Production Service is Contacted
+## 5. Strict Exit Code Semantics
 
-1. **Host Verification**: Inspect network requests in the terminal or test output; all calls target `127.0.0.1:8080`, `127.0.0.1:9099`, or `127.0.0.1:5001`.
-2. **Project ID Isolation**: The rules test suite initializes with an isolated dummy project ID (`lifeos-rules-test-project`), ensuring Cloud Firestore production projects cannot match or accept requests.
-3. **No Auth Tokens**: The test harness uses synthetic emulator auth tokens generated locally via `@firebase/rules-unit-testing`, which Google production endpoints reject immediately with `401 Unauthorized`.
+Both `test:rules` and `test:emulator` adhere to strict CI/CD exit behavior:
+- **Emulator Unavailable**: Exits with code `1`. Reports 0 executed, 0 passed, 0 failed, 11 skipped.
+- **Assertion Failure**: Exits with code `1`.
+- **All Passed**: Exits with code `0`.
+- **No False Greens**: A skipped test due to an unreachable daemon will **never** exit with code `0` or claim success.

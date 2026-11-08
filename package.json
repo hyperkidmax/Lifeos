@@ -12,7 +12,7 @@
     "test": "tsx src/test/dataIntegrity.test.ts",
     "test:rules": "tsx src/test/firestore.rules.test.ts",
     "test:emulator": "tsx src/test/functions.emulator.test.ts",
-    "test:emulator:clean": "curl -s -X DELETE http://127.0.0.1:8080/emulator/v1/projects/lifeos-rules-test-project/databases/ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4/documents || true"
+    "test:emulator:clean": "curl -s -X DELETE http://127.0.0.1:8080/emulator/v1/projects/demo-lifeos-test/databases/ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4/documents || true"
   },
   "dependencies": {
     "@firebase/rules-unit-testing": "^6.0.0",

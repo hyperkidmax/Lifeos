@@ -43,7 +43,7 @@ export async function runFirestoreRulesUnitTests(options?: {
 }> {
   const host = options?.host || process.env.FIRESTORE_EMULATOR_HOST?.split(':')[0] || '127.0.0.1';
   const port = options?.port || Number(process.env.FIRESTORE_EMULATOR_HOST?.split(':')[1]) || 8080;
-  const projectId = options?.projectId || 'lifeos-rules-test-project';
+  const projectId = options?.projectId || 'demo-lifeos-test';
   const databaseId = options?.databaseId || 'ai-studio-lifeospersonalwe-b862082e-4804-4384-8505-6fe6d79e3ac4';
 
   const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
@@ -281,18 +281,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   runFirestoreRulesUnitTests()
     .then((res) => {
       if (!res.executedAgainstEmulator) {
-        console.warn(`[EMULATOR NOT DETECTED] ${res.emulatorError}`);
-        console.log('Skipping live rules tests: Local Java or Emulator daemon not currently running in this environment.');
-        process.exit(0);
+        console.error(`[EMULATOR ERROR] ${res.emulatorError}`);
+        console.error('FAILED: Firestore Emulator is unavailable. Tests could not be executed.');
+        console.log(`\nSUMMARY: 0 executed, 0 passed, 0 failed, 11 skipped (Emulator unavailable).`);
+        process.exit(1);
       }
       let passed = 0;
+      let failed = 0;
       for (const r of res.results) {
         if (r.passed) passed++;
+        else failed++;
         console.log(`[${r.passed ? 'PASS' : 'FAIL'}] Rule Test ${r.testNumber}: ${r.name}`);
         console.log(`       ${r.details}`);
       }
-      console.log(`\nRULES TEST RESULTS: ${passed} / ${res.results.length} passed.`);
-      process.exit(passed === res.results.length ? 0 : 1);
+      console.log(`\nSUMMARY: ${res.results.length} executed, ${passed} passed, ${failed} failed, 0 skipped.`);
+      process.exit(failed === 0 ? 0 : 1);
     })
     .catch((err) => {
       console.error('Fatal test error:', err);
