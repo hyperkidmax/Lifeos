@@ -44,6 +44,16 @@ export function getGreeting(): string {
   return 'Good night';
 }
 
+export function getPersonalizedGreeting(profileName?: string, authDisplayName?: string | null): string {
+  const base = getGreeting();
+  const raw = (authDisplayName || profileName || '').trim();
+  if (!raw || raw.toLowerCase() === 'alex') {
+    return base;
+  }
+  const firstName = raw.split(' ')[0];
+  return `${base}, ${firstName}`;
+}
+
 export function getLast7Days(): string[] {
   const result: string[] = [];
   for (let i = 6; i >= 0; i--) {

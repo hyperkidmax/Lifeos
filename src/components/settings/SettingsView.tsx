@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useWellness } from '../../context/WellnessContext';
+import { useTheme, ThemeMode } from '../../context/ThemeContext';
 import { isDemoRecord } from '../../utils/mockData';
 import {
   User,
@@ -25,6 +26,10 @@ import {
   LogIn,
   LogOut,
   Server,
+  Sun,
+  Moon,
+  Monitor,
+  Palette,
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -51,6 +56,8 @@ export const SettingsView: React.FC = () => {
     syncWithCloud,
     migrateLocalData,
   } = useWellness();
+
+  const { theme, setTheme, resolvedTheme } = useTheme();
 
   // Modals for confirmation
   const [showClearDemoConfirm, setShowClearDemoConfirm] = useState(false);
@@ -295,6 +302,69 @@ export const SettingsView: React.FC = () => {
           <span>{statusNotification}</span>
         </div>
       )}
+
+      {/* APPEARANCE & THEME */}
+      <div className="bg-[var(--card-surface)] border border-[var(--card-border)] rounded-3xl p-5 shadow-sm transition-colors">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-2xl flex items-center justify-center bg-[#00F2A9]/10 border border-[#00F2A9]/30 text-[#00F2A9]">
+              <Palette className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold text-[var(--text-primary)]">Appearance & Theme</h2>
+                <span className="text-[10px] uppercase font-mono-num px-2 py-0.5 rounded-full bg-[#00F2A9]/15 text-[#00F2A9] border border-[#00F2A9]/30 font-semibold">
+                  {theme.toUpperCase()}{theme === 'system' ? ` (Auto: ${resolvedTheme})` : ''}
+                </span>
+              </div>
+              <span className="text-xs text-[var(--text-muted)]">
+                Choose between Nature Zen Light, CyberFit Dark, or automatic OS System sync
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 bg-[var(--bg-subtle)] p-1.5 rounded-2xl border border-[var(--card-border)]">
+          <button
+            type="button"
+            onClick={() => setTheme('light')}
+            className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+              theme === 'light'
+                ? 'bg-[var(--card-surface)] text-[var(--accent)] shadow-sm font-bold'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <Sun className="w-4 h-4 text-amber-500" />
+            Light
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTheme('dark')}
+            className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+              theme === 'dark'
+                ? 'bg-[var(--card-surface)] text-[#00F2A9] shadow-sm font-bold'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <Moon className="w-4 h-4 text-[#00F2A9]" />
+            Dark
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTheme('system')}
+            className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+              theme === 'system'
+                ? 'bg-[var(--card-surface)] text-[#00E5FF] shadow-sm font-bold'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            <Monitor className="w-4 h-4 text-[#00E5FF]" />
+            System
+          </button>
+        </div>
+      </div>
 
       {/* 1. OPERATING MODE: REAL MODE VS DEMO MODE */}
       <div className="bg-[#131317] border border-white/[0.08] rounded-3xl p-5 shadow-sm">

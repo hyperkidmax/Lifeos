@@ -1,20 +1,62 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
   :root {
-    --accent: #00E5FF;
-    --accent-glow: rgba(0, 229, 255, 0.15);
-    --bg-main: #080809;
-    --card-surface: #121215;
-    --card-border: rgba(255, 255, 255, 0.08);
+    /* Nature Health + Modern Zen Light Theme */
+    --bg-main: #F4F7F5;
+    --bg-subtle: #E8EFEA;
+    --card-surface: #FFFFFF;
+    --card-surface-elevated: #F9FBFA;
+    --card-border: rgba(18, 48, 38, 0.08);
+    --card-border-hover: rgba(16, 185, 129, 0.25);
+    
+    --text-primary: #0F1F17;
+    --text-secondary: #3B5245;
+    --text-muted: #647D70;
+    
+    --accent: #059669; /* Deep emerald in light mode */
+    --accent-mint: #10B981;
+    --accent-cyan: #0284C7;
+    --accent-purple: #7C3AED;
+    --accent-orange: #EA580C;
+    --accent-glow: rgba(16, 185, 129, 0.15);
+
+    --glass-bg: rgba(255, 255, 255, 0.85);
+    --glass-border: rgba(18, 48, 38, 0.08);
+  }
+
+  .dark {
+    /* Deep Forest Green + CyberFit + Modern Zen Dark Theme */
+    --bg-main: #060A08;
+    --bg-subtle: #0B120E;
+    --card-surface: #101814;
+    --card-surface-elevated: #15221B;
+    --card-border: rgba(255, 255, 255, 0.07);
+    --card-border-hover: rgba(0, 242, 169, 0.3);
+    
+    --text-primary: #F3F6F4;
+    --text-secondary: #B4C4BC;
+    --text-muted: #6E857A;
+    
+    --accent: #00F2A9; /* Vibrant mint in dark mode */
+    --accent-mint: #00F2A9;
+    --accent-cyan: #00E5FF;
+    --accent-purple: #A78BFA;
+    --accent-orange: #FB923C;
+    --accent-glow: rgba(0, 242, 169, 0.18);
+
+    --glass-bg: rgba(16, 24, 20, 0.82);
+    --glass-border: rgba(255, 255, 255, 0.08);
   }
 
   body {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
     background-color: var(--bg-main);
-    color: #f3f4f6;
+    color: var(--text-primary);
     overscroll-behavior-y: none;
     -webkit-tap-highlight-color: transparent;
+    transition: background-color 0.25s ease, color 0.25s ease;
   }
 
   /* Monospace metrics font for clean digital readouts */
@@ -24,7 +66,7 @@
   }
 }
 
-/* Custom scrollbar styling for webkit */
+/* Custom scrollbar styling */
 ::-webkit-scrollbar {
   width: 5px;
   height: 5px;
@@ -33,11 +75,11 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--card-border);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 229, 255, 0.4);
+  background: var(--accent);
 }
 
 .no-scrollbar::-webkit-scrollbar {
@@ -48,20 +90,28 @@
   scrollbar-width: none;
 }
 
-/* Glass & Neon Accents */
+/* Glass & Glow Accents */
 .glass-panel {
-  background: rgba(18, 18, 22, 0.85);
+  background: var(--glass-bg);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--glass-border);
+}
+
+.mint-glow {
+  box-shadow: 0 0 20px -3px rgba(0, 242, 169, 0.22);
 }
 
 .cyan-glow {
-  box-shadow: 0 0 20px -3px rgba(0, 229, 255, 0.25);
+  box-shadow: 0 0 20px -3px rgba(0, 229, 255, 0.22);
 }
 
-.cyan-glow-subtle {
-  box-shadow: 0 0 12px -2px rgba(0, 229, 255, 0.12);
+.purple-glow {
+  box-shadow: 0 0 20px -3px rgba(167, 139, 250, 0.22);
+}
+
+.orange-glow {
+  box-shadow: 0 0 20px -3px rgba(251, 146, 60, 0.22);
 }
 
 /* Safe area for mobile iPhones */
