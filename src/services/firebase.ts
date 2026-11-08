@@ -215,26 +215,39 @@ export async function batchRecordTombstonesViaCloudFunction(
       const chunk = items.slice(i, i + CHUNK_SIZE);
       try {
         const result = await batchFn({ items: chunk });
-        const chunkResultsMap = new Map<string, ClientBatchTombstoneItemResult>();
+        // Count occurrences of each returned key to detect duplicates
+        const resultCountMap = new Map<string, number>();
+        const resultMap = new Map<string, ClientBatchTombstoneItemResult>();
 
         if (result.data && Array.isArray(result.data.results)) {
           for (const itemResult of result.data.results) {
             if (itemResult && itemResult.collection && itemResult.id) {
               const k = `${itemResult.collection}__${itemResult.id}`;
-              // Count only first occurrence in case server emitted duplicate
-              if (!chunkResultsMap.has(k)) {
-                chunkResultsMap.set(k, itemResult);
+              resultCountMap.set(k, (resultCountMap.get(k) || 0) + 1);
+              if (!resultMap.has(k)) {
+                resultMap.set(k, itemResult);
               }
             }
           }
         }
 
-        // Account for EVERY submitted item in this chunk explicitly
+        // Account for EVERY submitted item in this chunk explicitly:
+        // Detect duplicates, missing results, explicit failures, and malformed statuses
         for (const submitted of chunk) {
           const k = `${submitted.collection}__${submitted.id}`;
-          const returned = chunkResultsMap.get(k);
+          const count = resultCountMap.get(k) || 0;
+          const returned = resultMap.get(k);
 
-          if (!returned) {
+          if (count > 1) {
+            // Duplicate results detected from server: mark failed so it remains pending for retry
+            allResults.push({
+              collection: submitted.collection,
+              id: submitted.id,
+              status: 'failed',
+              error: `Duplicate results (${count}) received from server response`,
+            });
+            totalFailed++;
+          } else if (count === 0 || !returned) {
             // Missing result from server response: mark failed so it remains pending
             allResults.push({
               collection: submitted.collection,
@@ -373,20 +386,68 @@ export async function executeResetChunkViaCloudFunction(): Promise<{
   }
 }
 
-// 6. Verify and finalize reset
-export async function verifyAndFinalizeResetViaCloudFunction(): Promise<{
+// 6. Get authoritative active reset state directly from server
+export async function getActiveResetStateFromCloud(
+  userId: string
+): Promise<{
+  resetId: string | null;
+  targetGeneration: number | null;
+  status: string;
+  leaseUntil: number;
+  currentCollectionIndex: number;
+  deletedCount: number;
+} | null> {
+  try {
+    const snap = await getDoc(doc(db, 'users', userId, 'meta', 'reset'));
+    if (snap.exists()) {
+      const d = snap.data();
+      return {
+        resetId: d?.resetId || null,
+        targetGeneration: typeof d?.targetGeneration === 'number' ? d.targetGeneration : null,
+        status: d?.status || 'idle',
+        leaseUntil: d?.leaseUntil || 0,
+        currentCollectionIndex: d?.currentCollectionIndex || 0,
+        deletedCount: d?.deletedCount || 0,
+      };
+    }
+    return null;
+  } catch (error) {
+    console.warn(`Could not read authoritative reset state:`, error);
+    return null;
+  }
+}
+
+// 7. Verify and finalize reset (requires authoritative active reset ID and target generation)
+export async function verifyAndFinalizeResetViaCloudFunction(
+  expectedResetId: string,
+  expectedGeneration: number
+): Promise<{
   success: boolean;
   status?: string;
   totalDeleted?: number;
+  resetId?: string;
+  newGeneration?: number;
   error?: string;
 }> {
+  if (!expectedResetId || typeof expectedResetId !== 'string') {
+    return { success: false, error: 'Cannot finalize reset without authoritative expectedResetId' };
+  }
+  if (typeof expectedGeneration !== 'number' || expectedGeneration < 1) {
+    return { success: false, error: 'Cannot finalize reset without authoritative expectedGeneration' };
+  }
+
   try {
-    const finalizeFn = httpsCallable<Record<string, never>, any>(functions, 'verifyAndFinalizeReset');
-    const result = await finalizeFn({});
+    const finalizeFn = httpsCallable<{ expectedResetId: string; expectedGeneration: number }, any>(
+      functions,
+      'verifyAndFinalizeReset'
+    );
+    const result = await finalizeFn({ expectedResetId, expectedGeneration });
     return {
       success: result.data.success,
       status: result.data.status,
       totalDeleted: result.data.totalDeleted,
+      resetId: result.data.resetId,
+      newGeneration: result.data.newGeneration,
     };
   } catch (error: any) {
     console.error('verifyAndFinalizeReset failed:', error);

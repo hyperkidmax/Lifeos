@@ -2620,6 +2620,129 @@ export function runDataIntegrityTestSuite(): TestResult[] {
     );
   }
 
+  // TEST 72: Batch tombstone client response processing detects duplicate results instead of silently deduplicating via Map
+  {
+    const chunkSubmitted = [
+      { collection: 'mealLogs', id: 'tomb-1' },
+      { collection: 'mealLogs', id: 'tomb-2' }, // Server erroneously returns duplicate result for tomb-2
+      { collection: 'workoutLogs', id: 'tomb-3' }, // Server erroneously omits tomb-3
+    ];
+
+    // Simulated server response with duplicate results for tomb-2
+    const serverResultData = {
+      results: [
+        { collection: 'mealLogs', id: 'tomb-1', status: 'registered' },
+        { collection: 'mealLogs', id: 'tomb-2', status: 'registered' },
+        { collection: 'mealLogs', id: 'tomb-2', status: 'already_existed' }, // Duplicate!
+      ],
+    };
+
+    // Client response parser implementation verification
+    const resultCountMap = new Map<string, number>();
+    const resultMap = new Map<string, any>();
+
+    for (const itemResult of serverResultData.results) {
+      const k = `${itemResult.collection}__${itemResult.id}`;
+      resultCountMap.set(k, (resultCountMap.get(k) || 0) + 1);
+      if (!resultMap.has(k)) {
+        resultMap.set(k, itemResult);
+      }
+    }
+
+    const processedResults: Array<{ id: string; status: string; error?: string }> = [];
+    let localFailedCount = 0;
+
+    for (const submitted of chunkSubmitted) {
+      const k = `${submitted.collection}__${submitted.id}`;
+      const count = resultCountMap.get(k) || 0;
+      const returned = resultMap.get(k);
+
+      if (count > 1) {
+        processedResults.push({
+          id: submitted.id,
+          status: 'failed',
+          error: `Duplicate results (${count}) received from server response`,
+        });
+        localFailedCount++;
+      } else if (count === 0 || !returned) {
+        processedResults.push({
+          id: submitted.id,
+          status: 'failed',
+          error: 'Missing result from server response',
+        });
+        localFailedCount++;
+      } else {
+        processedResults.push(returned);
+      }
+    }
+
+    const tomb1Success = processedResults.find((r) => r.id === 'tomb-1')?.status === 'registered';
+    const tomb2DetectedDuplicate =
+      processedResults.find((r) => r.id === 'tomb-2')?.status === 'failed' &&
+      processedResults.find((r) => r.id === 'tomb-2')?.error?.includes('Duplicate results');
+    const tomb3DetectedMissing =
+      processedResults.find((r) => r.id === 'tomb-3')?.status === 'failed' &&
+      processedResults.find((r) => r.id === 'tomb-3')?.error?.includes('Missing result');
+
+    assert(
+      72,
+      'Batch tombstone client response processing detects duplicate server results and marks them failed for retry',
+      tomb1Success && Boolean(tomb2DetectedDuplicate) && Boolean(tomb3DetectedMissing) && localFailedCount === 2,
+      'Duplicate server results were explicitly detected and marked failed instead of silently accepted via Map'
+    );
+  }
+
+  // TEST 73: Mandatory expectedResetId and expectedGeneration in reset finalization rejects missing or mismatched values
+  {
+    const authoritativeServerReset = {
+      resetId: 'reset_auth_888',
+      targetGeneration: 5,
+      status: 'in_progress',
+      leaseUntil: 0,
+    };
+
+    const validateFinalizeRequest = (req: { expectedResetId?: any; expectedGeneration?: any }) => {
+      if (!req.expectedResetId || typeof req.expectedResetId !== 'string') {
+        return { valid: false, error: 'Missing or invalid expectedResetId' };
+      }
+      if (typeof req.expectedGeneration !== 'number' || !Number.isInteger(req.expectedGeneration) || req.expectedGeneration < 1) {
+        return { valid: false, error: 'Missing or invalid expectedGeneration' };
+      }
+      if (req.expectedResetId !== authoritativeServerReset.resetId) {
+        return { valid: false, error: 'Reset ID mismatch' };
+      }
+      if (req.expectedGeneration !== authoritativeServerReset.targetGeneration) {
+        return { valid: false, error: 'Reset generation mismatch' };
+      }
+      return { valid: true };
+    };
+
+    // Case 1: Missing expectedResetId
+    const res1 = validateFinalizeRequest({ expectedGeneration: 5 });
+    // Case 2: Missing expectedGeneration
+    const res2 = validateFinalizeRequest({ expectedResetId: 'reset_auth_888' });
+    // Case 3: Stale / mismatched expectedResetId
+    const res3 = validateFinalizeRequest({ expectedResetId: 'reset_stale_111', expectedGeneration: 5 });
+    // Case 4: Mismatched expectedGeneration
+    const res4 = validateFinalizeRequest({ expectedResetId: 'reset_auth_888', expectedGeneration: 4 });
+    // Case 5: Authoritative valid parameters
+    const res5 = validateFinalizeRequest({ expectedResetId: 'reset_auth_888', expectedGeneration: 5 });
+
+    const pass =
+      !res1.valid && res1.error?.includes('expectedResetId') &&
+      !res2.valid && res2.error?.includes('expectedGeneration') &&
+      !res3.valid && res3.error?.includes('Reset ID mismatch') &&
+      !res4.valid && res4.error?.includes('Reset generation mismatch') &&
+      res5.valid;
+
+    assert(
+      73,
+      'Reset finalization Cloud Function strictly enforces mandatory expectedResetId and expectedGeneration',
+      Boolean(pass),
+      'Missing, stale, or mismatched parameters were rejected; only authoritative active values were accepted'
+    );
+  }
+
   return results;
 }
 

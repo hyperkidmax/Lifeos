@@ -219,6 +219,13 @@ exports.verifyAndFinalizeReset = (0, https_1.onCall)({ region: 'asia-northeast1'
         throw new https_1.HttpsError('unauthenticated', 'User must be authenticated');
     }
     const { expectedResetId, expectedGeneration } = (request.data || {});
+    // Enforce that expectedResetId and expectedGeneration are MANDATORY parameters
+    if (!expectedResetId || typeof expectedResetId !== 'string') {
+        throw new https_1.HttpsError('invalid-argument', 'Missing or invalid expectedResetId: client must provide the authoritative active reset ID');
+    }
+    if (typeof expectedGeneration !== 'number' || !Number.isInteger(expectedGeneration) || expectedGeneration < 1) {
+        throw new https_1.HttpsError('invalid-argument', 'Missing or invalid expectedGeneration: client must provide the authoritative target generation');
+    }
     const resetRef = config_js_1.adminDb.doc(`users/${uid}/meta/reset`);
     const syncRef = config_js_1.adminDb.doc(`users/${uid}/meta/sync`);
     // Step A: Pre-check collection emptiness across all target reset collections
@@ -254,12 +261,12 @@ exports.verifyAndFinalizeReset = (0, https_1.onCall)({ region: 'asia-northeast1'
         if (resetData.status !== 'in_progress') {
             throw new https_1.HttpsError('failed-precondition', `Reset document is in state "${resetData.status}", not "in_progress"`);
         }
-        // 2. Verify expected reset ID matches if supplied
-        if (expectedResetId && resetData.resetId !== expectedResetId) {
+        // 2. Verify expected reset ID matches the active reset document
+        if (resetData.resetId !== expectedResetId) {
             throw new https_1.HttpsError('aborted', `Reset ID mismatch (expected: ${expectedResetId}, active: ${resetData.resetId})`);
         }
-        // 3. Verify target generation matches if supplied
-        if (expectedGeneration && resetData.targetGeneration !== expectedGeneration) {
+        // 3. Verify target generation matches the active reset document
+        if (resetData.targetGeneration !== expectedGeneration) {
             throw new https_1.HttpsError('aborted', `Reset generation mismatch (expected: ${expectedGeneration}, active: ${resetData.targetGeneration})`);
         }
         // 4. Verify no execution lease is currently active (worker chunk running)

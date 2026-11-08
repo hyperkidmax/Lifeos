@@ -258,8 +258,8 @@ export const executeResetChunk = onCall({ region: 'asia-northeast1' }, async (re
 
 // 4. Verify and Finalize Reset: Must verify all target collections are empty before completion
 interface FinalizeResetRequest {
-  expectedResetId?: string;
-  expectedGeneration?: number;
+  expectedResetId: string;
+  expectedGeneration: number;
 }
 
 export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, async (request) => {
@@ -269,6 +269,21 @@ export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, asyn
   }
 
   const { expectedResetId, expectedGeneration } = (request.data || {}) as FinalizeResetRequest;
+
+  // Enforce that expectedResetId and expectedGeneration are MANDATORY parameters
+  if (!expectedResetId || typeof expectedResetId !== 'string') {
+    throw new HttpsError(
+      'invalid-argument',
+      'Missing or invalid expectedResetId: client must provide the authoritative active reset ID'
+    );
+  }
+
+  if (typeof expectedGeneration !== 'number' || !Number.isInteger(expectedGeneration) || expectedGeneration < 1) {
+    throw new HttpsError(
+      'invalid-argument',
+      'Missing or invalid expectedGeneration: client must provide the authoritative target generation'
+    );
+  }
 
   const resetRef = adminDb.doc(`users/${uid}/meta/reset`);
   const syncRef = adminDb.doc(`users/${uid}/meta/sync`);
@@ -315,16 +330,16 @@ export const verifyAndFinalizeReset = onCall({ region: 'asia-northeast1' }, asyn
       );
     }
 
-    // 2. Verify expected reset ID matches if supplied
-    if (expectedResetId && resetData.resetId !== expectedResetId) {
+    // 2. Verify expected reset ID matches the active reset document
+    if (resetData.resetId !== expectedResetId) {
       throw new HttpsError(
         'aborted',
         `Reset ID mismatch (expected: ${expectedResetId}, active: ${resetData.resetId})`
       );
     }
 
-    // 3. Verify target generation matches if supplied
-    if (expectedGeneration && resetData.targetGeneration !== expectedGeneration) {
+    // 3. Verify target generation matches the active reset document
+    if (resetData.targetGeneration !== expectedGeneration) {
       throw new HttpsError(
         'aborted',
         `Reset generation mismatch (expected: ${expectedGeneration}, active: ${resetData.targetGeneration})`

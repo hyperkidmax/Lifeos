@@ -29,6 +29,7 @@ import {
   startGlobalResetViaCloudFunction,
   executeResetChunkViaCloudFunction,
   verifyAndFinalizeResetViaCloudFunction,
+  getActiveResetStateFromCloud,
 } from '../services/firebase';
 import { localDb } from '../services/localDb';
 
@@ -980,8 +981,17 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
           finished = Boolean(chunkRes.isFinished);
         }
 
-        // Phase 3: Verification
-        const verifyRes = await verifyAndFinalizeResetViaCloudFunction();
+        // Phase 3: Verification with authoritative reset state
+        // Obtain expectedResetId and expectedGeneration directly from the authoritative reset state
+        const activeReset = await getActiveResetStateFromCloud(currentUser.uid);
+        const targetResetId = activeReset?.resetId || startRes.resetId;
+        const targetGen = activeReset?.targetGeneration || startRes.newGeneration;
+
+        if (!targetResetId || typeof targetGen !== 'number') {
+          throw new Error('Authoritative reset metadata is unavailable; cannot finalize reset safely');
+        }
+
+        const verifyRes = await verifyAndFinalizeResetViaCloudFunction(targetResetId, targetGen);
         if (!verifyRes.success) {
           throw new Error(verifyRes.error || 'Reset verification failed');
         }
@@ -990,7 +1000,7 @@ export const WellnessProvider: React.FC<{ children: ReactNode }> = ({ children }
         const cleanState: LifeOSData = {
           ...EMPTY_INITIAL_STATE,
           isDemoMode: false,
-          generation: startRes.newGeneration || (dataRef.current.generation || 1) + 1,
+          generation: targetGen,
           tombstones: [],
           pendingTombstones: [],
         };
