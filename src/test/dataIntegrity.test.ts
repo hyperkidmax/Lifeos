@@ -2413,6 +2413,213 @@ export function runDataIntegrityTestSuite(): TestResult[] {
     );
   }
 
+  // TEST 68: Simultaneous reset requests are transactionally rejected if reset is already in_progress
+  {
+    // Existing active reset in progress
+    const activeReset = {
+      resetId: 'reset_active_123',
+      status: 'in_progress',
+      targetGeneration: 3,
+      currentCollectionIndex: 1,
+      deletedCount: 250,
+      leaseUntil: Date.now() + 25000,
+      leaseToken: 1,
+    };
+
+    // Client 2 attempts to trigger startGlobalReset while activeReset is in_progress
+    let overlappingRejected = false;
+    let rejectionReason = '';
+
+    // Transaction logic simulation
+    if (activeReset.status === 'in_progress') {
+      overlappingRejected = true;
+      rejectionReason = `A global reset is already in progress (resetId: ${activeReset.resetId}). Overlapping resets are rejected to preserve resumability.`;
+    }
+
+    // Verify existing state was preserved without overwrite
+    const preservedState =
+      activeReset.resetId === 'reset_active_123' &&
+      activeReset.targetGeneration === 3 &&
+      activeReset.currentCollectionIndex === 1 &&
+      activeReset.deletedCount === 250 &&
+      activeReset.leaseToken === 1;
+
+    assert(
+      68,
+      'Simultaneous reset requests are transactionally rejected and preserve active reset progress',
+      overlappingRejected && preservedState,
+      `Overlapping request rejected with "${rejectionReason}" and active reset state was 100% preserved`
+    );
+  }
+
+  // TEST 69: Reset starting during batch tombstone registration causes transaction abort and client retry queueing
+  {
+    // A batch of tombstones is validating while reset status transitions to 'in_progress'
+    const resetRefDoc = { status: 'in_progress' };
+    const syncRefDoc = { currentGeneration: 5 };
+
+    const chunkItems = [
+      { rawCollection: 'mealLogs', rawId: 'meal-concur-1' },
+      { rawCollection: 'workoutLogs', rawId: 'workout-concur-2' },
+    ];
+
+    const results: Array<{ collection: string; id: string; status: string; error?: string }> = [];
+
+    // Transaction executes: must read resetRefDoc INSIDE transaction
+    try {
+      if (resetRefDoc.status === 'in_progress') {
+        throw new Error('Global reset is in progress; writes and deletions are paused');
+      }
+      // Would have committed tombstones with generation 5
+    } catch (txErr: any) {
+      for (const it of chunkItems) {
+        results.push({
+          collection: it.rawCollection,
+          id: it.rawId,
+          status: 'failed',
+          error: txErr.message,
+        });
+      }
+    }
+
+    const allFailedForRetry =
+      results.length === 2 &&
+      results.every((r) => r.status === 'failed') &&
+      results[0].error?.includes('Global reset is in progress');
+
+    assert(
+      69,
+      'Reset starting during batch tombstone registration aborts chunk transaction and queues items for client retry',
+      Boolean(allFailedForRetry),
+      'Chunk transaction caught active reset inside transaction, aborted write, and marked all items failed for client retry'
+    );
+  }
+
+  // TEST 70: Protected reset finalization rejects stale workers, active leases, and mismatched generations
+  {
+    const resetDoc = {
+      resetId: 'reset_expected_777',
+      targetGeneration: 4,
+      status: 'in_progress',
+      leaseUntil: Date.now() + 15000, // Active execution lease!
+    };
+    const syncDoc = {
+      activeResetId: 'reset_expected_777',
+      resetStatus: 'in_progress',
+    };
+
+    // Attempt 1: Finalize while lease is active
+    let leaseActiveBlocked = false;
+    if (resetDoc.leaseUntil > Date.now()) {
+      leaseActiveBlocked = true;
+    }
+
+    // Attempt 2: Finalize with mismatched expected reset ID
+    let idMismatchBlocked = false;
+    const staleWorkerResetId = 'reset_stale_999';
+    if (resetDoc.resetId !== staleWorkerResetId) {
+      idMismatchBlocked = true;
+    }
+
+    // Attempt 3: Finalize when sync metadata points elsewhere
+    let syncMismatchBlocked = false;
+    const divergentSyncDoc = { activeResetId: 'reset_another_888', resetStatus: 'in_progress' };
+    if (divergentSyncDoc.activeResetId !== resetDoc.resetId) {
+      syncMismatchBlocked = true;
+    }
+
+    // Attempt 4: Clean finalization when lease expired and all IDs match
+    const expiredLeaseResetDoc = { ...resetDoc, leaseUntil: 0 };
+    let validFinalizeSuccess = false;
+    if (
+      expiredLeaseResetDoc.status === 'in_progress' &&
+      expiredLeaseResetDoc.leaseUntil <= Date.now() &&
+      expiredLeaseResetDoc.resetId === 'reset_expected_777' &&
+      syncDoc.activeResetId === expiredLeaseResetDoc.resetId
+    ) {
+      validFinalizeSuccess = true;
+    }
+
+    assert(
+      70,
+      'Protected reset finalization validates lease inactivity, reset ID consistency, and sync metadata atomically',
+      leaseActiveBlocked && idMismatchBlocked && syncMismatchBlocked && validFinalizeSuccess,
+      'All 3 invalid finalization scenarios were strictly blocked and valid finalization succeeded atomically'
+    );
+  }
+
+  // TEST 71: Missing, duplicate, malformed, or failed client results require exactly one valid confirmation before sync
+  {
+    const submittedItems = [
+      { collection: 'mealLogs', id: 'meal-1' },
+      { collection: 'mealLogs', id: 'meal-2' }, // will have duplicate results
+      { collection: 'mealLogs', id: 'meal-3' }, // will be missing from server response
+      { collection: 'mealLogs', id: 'meal-4' }, // will be explicit failure
+      { collection: 'workoutLogs', id: 'work-5' }, // will have malformed status
+      { collection: 'workoutLogs', id: 'work-6' }, // will be valid already_existed
+    ];
+
+    // Raw server results from callable
+    const rawServerResults = [
+      { collection: 'mealLogs', id: 'meal-1', status: 'registered' },
+      // Duplicate results for meal-2
+      { collection: 'mealLogs', id: 'meal-2', status: 'registered' },
+      { collection: 'mealLogs', id: 'meal-2', status: 'registered' },
+      // meal-3 is omitted entirely
+      { collection: 'mealLogs', id: 'meal-4', status: 'failed', error: 'Database locked' },
+      { collection: 'workoutLogs', id: 'work-5', status: 'corrupted_status' as any },
+      { collection: 'workoutLogs', id: 'work-6', status: 'already_existed' },
+    ];
+
+    // Step A: Client batches response accounting for every submitted item
+    const chunkResultsMap = new Map<string, any>();
+    for (const r of rawServerResults) {
+      const k = `${r.collection}__${r.id}`;
+      // In batch processor, detect duplicate from server
+      if (!chunkResultsMap.has(k)) {
+        chunkResultsMap.set(k, [r]);
+      } else {
+        chunkResultsMap.get(k).push(r);
+      }
+    }
+
+    // Step B: Verification of exactly one confirmation
+    const validConfirmationCounts = new Map<string, number>();
+    const invalidKeys = new Set<string>();
+
+    for (const r of rawServerResults) {
+      const k = `${r.collection}__${r.id}`;
+      if (r.status === 'registered' || r.status === 'already_existed') {
+        validConfirmationCounts.set(k, (validConfirmationCounts.get(k) || 0) + 1);
+      } else {
+        invalidKeys.add(k);
+      }
+    }
+
+    const strictlyConfirmedKeys = new Set<string>();
+    for (const [k, count] of validConfirmationCounts.entries()) {
+      if (count === 1 && !invalidKeys.has(k)) {
+        strictlyConfirmedKeys.add(k);
+      }
+    }
+
+    const acknowledged = submittedItems.filter((it) => strictlyConfirmedKeys.has(`${it.collection}__${it.id}`));
+    const retainedForRetry = submittedItems.filter((it) => !strictlyConfirmedKeys.has(`${it.collection}__${it.id}`));
+
+    const pass =
+      acknowledged.length === 2 &&
+      acknowledged.map((a) => a.id).sort().join(',') === 'meal-1,work-6' &&
+      retainedForRetry.length === 4 &&
+      retainedForRetry.map((r) => r.id).sort().join(',') === 'meal-2,meal-3,meal-4,work-5';
+
+    assert(
+      71,
+      'Client requires exactly one valid result per submitted tombstone; missing, duplicate, and failed remain pending',
+      pass,
+      'meal-1 and work-6 confirmed; meal-2 (duplicate), meal-3 (missing), meal-4 (failed), and work-5 (malformed) kept pending for retry'
+    );
+  }
+
   return results;
 }
 

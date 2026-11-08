@@ -99,11 +99,6 @@ exports.batchRecordTombstones = (0, https_1.onCall)({ region: 'asia-northeast1' 
     }
     const syncRef = config_js_1.adminDb.doc(`users/${uid}/meta/sync`);
     const resetRef = config_js_1.adminDb.doc(`users/${uid}/meta/reset`);
-    const [syncSnap, resetSnap] = await Promise.all([syncRef.get(), resetRef.get()]);
-    if (resetSnap.exists && resetSnap.data()?.status === 'in_progress') {
-        throw new https_1.HttpsError('failed-precondition', 'Global reset is in progress');
-    }
-    const currentGen = syncSnap.exists ? (syncSnap.data()?.currentGeneration || 1) : 1;
     // Validate items up-front while tracking per-item status
     const results = [];
     const validated = [];
@@ -148,15 +143,26 @@ exports.batchRecordTombstones = (0, https_1.onCall)({ region: 'asia-northeast1' 
     }
     let registeredCount = 0;
     let alreadyExistedCount = 0;
+    let finalObservedGen = 1;
     // Process validated items in atomic, transactional chunks of up to 100 items (200 ops per transaction <= 500 limit).
-    // Using runTransaction with tx.getAll guarantees optimistic concurrency control:
-    // If a concurrent worker is registering the same tombstone doc, the transaction serializes cleanly
-    // and the second worker observes exists=true, leaving existing metadata completely immutable.
+    // CRITICAL CONCURRENCY FIX: Read reset status and server sync generation INSIDE EACH TRANSACTION.
+    // This guarantees that if a global reset starts while a batch is in flight, the transaction immediately
+    // detects reset status === 'in_progress', aborts tombstone creation, and prevents stale generation writes.
     const CHUNK_SIZE = 100;
     for (let i = 0; i < validated.length; i += CHUNK_SIZE) {
         const chunk = validated.slice(i, i + CHUNK_SIZE);
         try {
             const chunkResults = await config_js_1.adminDb.runTransaction(async (tx) => {
+                // 1. Transactionally read reset status
+                const resetSnap = await tx.get(resetRef);
+                if (resetSnap.exists && resetSnap.data()?.status === 'in_progress') {
+                    throw new https_1.HttpsError('failed-precondition', 'Global reset is in progress; writes and deletions are paused');
+                }
+                // 2. Transactionally read authoritative current generation
+                const syncSnap = await tx.get(syncRef);
+                const currentGen = syncSnap.exists ? (syncSnap.data()?.currentGeneration || 1) : 1;
+                finalObservedGen = currentGen;
+                // 3. Transactionally inspect existing tombstones
                 const tombstoneRefs = chunk.map((v) => config_js_1.adminDb.doc(`users/${uid}/tombstones/${v.tombstoneDocId}`));
                 const tombstoneSnaps = await tx.getAll(...tombstoneRefs);
                 const subResults = [];
@@ -175,7 +181,7 @@ exports.batchRecordTombstones = (0, https_1.onCall)({ region: 'asia-northeast1' 
                         });
                     }
                     else {
-                        // Create brand new immutable tombstone
+                        // Create brand new immutable tombstone with transactionally locked currentGen
                         tx.set(tombstoneRef, {
                             id: v.cleanId,
                             collection: v.collection,
@@ -203,7 +209,7 @@ exports.batchRecordTombstones = (0, https_1.onCall)({ region: 'asia-northeast1' 
             }
         }
         catch (chunkError) {
-            // If transaction fails after retries, mark every item in this chunk as failed for client retry
+            // If reset is in progress or transaction failed, mark every item in this chunk as failed for client retry
             for (const v of chunk) {
                 results.push({
                     collection: v.rawCollection,
@@ -221,7 +227,7 @@ exports.batchRecordTombstones = (0, https_1.onCall)({ region: 'asia-northeast1' 
         alreadyExistedCount,
         failedCount,
         results,
-        generation: currentGen,
+        generation: finalObservedGen,
     };
 });
 //# sourceMappingURL=tombstones.js.map

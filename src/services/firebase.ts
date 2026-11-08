@@ -215,12 +215,49 @@ export async function batchRecordTombstonesViaCloudFunction(
       const chunk = items.slice(i, i + CHUNK_SIZE);
       try {
         const result = await batchFn({ items: chunk });
-        if (result.data) {
-          totalRegistered += result.data.registeredCount || 0;
-          totalAlreadyExisted += result.data.alreadyExistedCount || 0;
-          totalFailed += result.data.failedCount || 0;
-          if (Array.isArray(result.data.results)) {
-            allResults.push(...result.data.results);
+        const chunkResultsMap = new Map<string, ClientBatchTombstoneItemResult>();
+
+        if (result.data && Array.isArray(result.data.results)) {
+          for (const itemResult of result.data.results) {
+            if (itemResult && itemResult.collection && itemResult.id) {
+              const k = `${itemResult.collection}__${itemResult.id}`;
+              // Count only first occurrence in case server emitted duplicate
+              if (!chunkResultsMap.has(k)) {
+                chunkResultsMap.set(k, itemResult);
+              }
+            }
+          }
+        }
+
+        // Account for EVERY submitted item in this chunk explicitly
+        for (const submitted of chunk) {
+          const k = `${submitted.collection}__${submitted.id}`;
+          const returned = chunkResultsMap.get(k);
+
+          if (!returned) {
+            // Missing result from server response: mark failed so it remains pending
+            allResults.push({
+              collection: submitted.collection,
+              id: submitted.id,
+              status: 'failed',
+              error: 'Missing result from server response',
+            });
+            totalFailed++;
+          } else if (returned.status === 'registered') {
+            allResults.push(returned);
+            totalRegistered++;
+          } else if (returned.status === 'already_existed') {
+            allResults.push(returned);
+            totalAlreadyExisted++;
+          } else {
+            // Explicit failed status or malformed status
+            allResults.push({
+              collection: submitted.collection,
+              id: submitted.id,
+              status: 'failed',
+              error: returned.error || 'Server reported item registration failed',
+            });
+            totalFailed++;
           }
         }
       } catch (chunkError: any) {
@@ -1234,17 +1271,35 @@ export async function syncAndMergeWithCloud(
         initialPendingTombstones.map((t) => ({ collection: t.collection, id: t.id, deletedAt: t.deletedAt }))
       );
 
-      // Build a set of confirmed keys: collection__id
-      const confirmedKeys = new Set<string>();
+      // Build a map counting valid confirmations: exactly one 'registered' or 'already_existed' result is accepted
+      const validConfirmationCounts = new Map<string, number>();
+      const invalidKeys = new Set<string>();
+
       if (Array.isArray(res.results)) {
         for (const itemResult of res.results) {
+          if (!itemResult || !itemResult.collection || !itemResult.id) continue;
+          const k = `${itemResult.collection}__${itemResult.id}`;
+
           if (itemResult.status === 'registered' || itemResult.status === 'already_existed') {
-            confirmedKeys.add(`${itemResult.collection}__${itemResult.id}`);
+            const count = (validConfirmationCounts.get(k) || 0) + 1;
+            validConfirmationCounts.set(k, count);
+          } else {
+            // Explicit failure or malformed status marks item invalid
+            invalidKeys.add(k);
           }
         }
       }
 
-      // Acknowledge locally ONLY the confirmed items
+      // Exactly one valid result required before acknowledging:
+      // Count === 1 and not flagged invalid
+      const confirmedKeys = new Set<string>();
+      for (const [k, count] of validConfirmationCounts.entries()) {
+        if (count === 1 && !invalidKeys.has(k)) {
+          confirmedKeys.add(k);
+        }
+      }
+
+      // Acknowledge locally ONLY the strictly confirmed items
       for (const t of initialPendingTombstones) {
         const key = `${t.collection}__${t.id}`;
         if (confirmedKeys.has(key)) {
@@ -1252,7 +1307,7 @@ export async function syncAndMergeWithCloud(
         }
       }
 
-      // Retain unconfirmed or failed items in local memory for retry
+      // Retain unconfirmed, duplicate, missing, or failed items in local memory for retry
       remainingPendingTombstones = initialPendingTombstones.filter(
         (t) => !confirmedKeys.has(`${t.collection}__${t.id}`)
       );
