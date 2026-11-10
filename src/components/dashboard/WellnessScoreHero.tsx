@@ -1,40 +1,30 @@
 import React from 'react';
 import { useWellness, ActiveTab } from '../../context/WellnessContext';
 import { Card } from '../ui/Card';
-import { Moon, Heart, Footprints, Utensils, Droplet, ArrowRight, Sparkles, Check, Clock } from 'lucide-react';
+import { Moon, Footprints, Utensils, Droplet, CheckSquare, Check, Clock } from 'lucide-react';
+import { calculateWellnessScore, PILLAR_WEIGHT_PERCENTAGES } from '../../utils/wellnessScore';
 
 export const WellnessScoreHero: React.FC = () => {
   const {
     data,
     todaySteps,
     todaySleep,
-    todayHeartRate,
     todayWaterTotal,
     todayCaloriesConsumed,
     todayActiveCaloriesBurned,
+    todayHabitsStatus,
+    todayPriorities,
     setActiveTab,
   } = useWellness();
 
   const goals = data.goals;
 
-  // 1. Sleep Pillar Score (0 - 100)
+  // 1. Sleep Pillar Score (Weight: 25% / 0.25)
   const sleepScore: number | null = todaySleep
     ? todaySleep.qualityScore ?? Math.min(100, Math.round((todaySleep.totalMinutes / goals.dailySleepMinutes) * 100))
     : null;
 
-  // 2. Recovery Pillar Score (0 - 100)
-  let recoveryScore: number | null = null;
-  if (todayHeartRate?.restingBpm) {
-    const rBpm = todayHeartRate.restingBpm;
-    if (rBpm <= 60) recoveryScore = 95;
-    else if (rBpm <= 68) recoveryScore = 88;
-    else if (rBpm <= 75) recoveryScore = 80;
-    else recoveryScore = 68;
-  } else if (todaySleep?.qualityScore) {
-    recoveryScore = Math.max(50, Math.min(95, todaySleep.qualityScore - 4));
-  }
-
-  // 3. Activity Pillar Score (0 - 100)
+  // 2. Activity Pillar Score (Weight: 25% / 0.25)
   const stepRatio = todaySteps ? todaySteps.count / goals.dailySteps : 0;
   const burnRatio = todayActiveCaloriesBurned > 0 ? todayActiveCaloriesBurned / goals.dailyActiveCalories : 0;
   let activityScore: number | null = null;
@@ -43,55 +33,106 @@ export const WellnessScoreHero: React.FC = () => {
     activityScore = Math.min(100, Math.round(combined * 100));
   }
 
-  // 4. Nutrition Pillar Score (0 - 100)
-  const waterRatio = todayWaterTotal > 0 ? todayWaterTotal / goals.dailyWaterMl : 0;
-  const calRatio = todayCaloriesConsumed > 0 ? Math.min(1, todayCaloriesConsumed / goals.dailyCalories) : 0;
+  // 3. Nutrition Pillar Score (Weight: 20% / 0.20) - Scored independently of water
   let nutritionScore: number | null = null;
-  if (todayWaterTotal > 0 || todayCaloriesConsumed > 0) {
-    const combined = waterRatio > 0 && calRatio > 0 ? (waterRatio * 0.5 + calRatio * 0.5) : waterRatio || calRatio;
-    nutritionScore = Math.min(100, Math.round(combined * 100));
+  if (todayCaloriesConsumed > 0) {
+    nutritionScore = Math.min(100, Math.round((todayCaloriesConsumed / goals.dailyCalories) * 100));
   }
 
-  // Preserve existing composite Wellness Score formula exactly
-  const validPillars = [
-    { score: sleepScore, weight: 0.3 },
-    { score: recoveryScore, weight: 0.2 },
-    { score: activityScore, weight: 0.3 },
-    { score: nutritionScore, weight: 0.2 },
-  ].filter((p): p is { score: number; weight: number } => p.score !== null);
-
-  let totalScore: number | null = null;
-  if (validPillars.length > 0) {
-    const totalWeight = validPillars.reduce((acc, p) => acc + p.weight, 0);
-    const weightedSum = validPillars.reduce((acc, p) => acc + p.score * p.weight, 0);
-    totalScore = Math.round(weightedSum / totalWeight);
+  // 4. Hydration Pillar Score (Weight: 15% / 0.15) - Scored independently of food
+  let hydrationScore: number | null = null;
+  if (todayWaterTotal > 0) {
+    hydrationScore = Math.min(100, Math.round((todayWaterTotal / goals.dailyWaterMl) * 100));
   }
 
-  // 5 Contributing Health Domains
+  // 5. Habits / Mindset Pillar Score (Weight: 15% / 0.15) - Uses actual completion data
+  let habitsScore: number | null = null;
+  const completedHabits = todayHabitsStatus.filter((h) => h.isCompleted).length;
+  const totalHabits = todayHabitsStatus.length;
+
+  if (totalHabits > 0 && completedHabits > 0) {
+    habitsScore = Math.min(100, Math.round((completedHabits / totalHabits) * 100));
+  } else if (totalHabits === 0 && todayPriorities.length > 0 && todayPriorities.some((p) => p.completed)) {
+    const completedPriorities = todayPriorities.filter((p) => p.completed).length;
+    habitsScore = Math.min(100, Math.round((completedPriorities / todayPriorities.length) * 100));
+  }
+
+  // Canonical Five-Pillar Wellness Score Calculation
+  const scoreResult = calculateWellnessScore({
+    sleepScore,
+    activityScore,
+    nutritionScore,
+    hydrationScore,
+    habitsScore,
+  });
+
+  const { score: totalScore, activeDomainsCount, confidenceLabel } = scoreResult;
+
+  // The 5 actual pillars with their correct restored weights
   const domainPresence = [
-    { id: 'sleep', name: 'Sleep', active: !!todaySleep, color: '#A78BFA', icon: Moon, tab: 'health' as ActiveTab },
-    { id: 'recovery', name: 'Recovery', active: !!(todayHeartRate || todaySleep?.qualityScore), color: '#00F2A9', icon: Heart, tab: 'health' as ActiveTab },
-    { id: 'activity', name: 'Activity', active: !!(todaySteps || todayActiveCaloriesBurned > 0), color: '#00E5FF', icon: Footprints, tab: 'fitness' as ActiveTab },
-    { id: 'nutrition', name: 'Nutrition', active: todayCaloriesConsumed > 0, color: '#F59E0B', icon: Utensils, tab: 'nutrition' as ActiveTab },
-    { id: 'hydration', name: 'Hydration', active: todayWaterTotal > 0, color: '#38BDF8', icon: Droplet, tab: 'nutrition' as ActiveTab },
+    {
+      id: 'sleep',
+      name: 'Sleep',
+      weight: PILLAR_WEIGHT_PERCENTAGES.sleep,
+      active: sleepScore !== null,
+      score: sleepScore,
+      color: '#A78BFA',
+      icon: Moon,
+      tab: 'health' as ActiveTab,
+    },
+    {
+      id: 'activity',
+      name: 'Activity',
+      weight: PILLAR_WEIGHT_PERCENTAGES.activity,
+      active: activityScore !== null,
+      score: activityScore,
+      color: '#00E5FF',
+      icon: Footprints,
+      tab: 'fitness' as ActiveTab,
+    },
+    {
+      id: 'nutrition',
+      name: 'Nutrition',
+      weight: PILLAR_WEIGHT_PERCENTAGES.nutrition,
+      active: nutritionScore !== null,
+      score: nutritionScore,
+      color: '#F59E0B',
+      icon: Utensils,
+      tab: 'nutrition' as ActiveTab,
+    },
+    {
+      id: 'hydration',
+      name: 'Hydration',
+      weight: PILLAR_WEIGHT_PERCENTAGES.hydration,
+      active: hydrationScore !== null,
+      score: hydrationScore,
+      color: '#38BDF8',
+      icon: Droplet,
+      tab: 'nutrition' as ActiveTab,
+    },
+    {
+      id: 'habits',
+      name: 'Habits/Mindset',
+      weight: PILLAR_WEIGHT_PERCENTAGES.habits,
+      active: habitsScore !== null,
+      score: habitsScore,
+      color: '#00F2A9',
+      icon: CheckSquare,
+      tab: 'myday' as ActiveTab,
+    },
   ];
-  const activeDomainsCount = domainPresence.filter((d) => d.active).length;
 
-  // Confidence assessment
-  let confidenceLabel = 'Awaiting Logs';
+  // Confidence tone (separate from score)
   let confidenceTone = 'text-[var(--text-muted)]';
   if (activeDomainsCount >= 4) {
-    confidenceLabel = 'High Confidence';
     confidenceTone = 'text-[#00F2A9]';
-  } else if (activeDomainsCount >= 2) {
-    confidenceLabel = 'Moderate Confidence';
+  } else if (activeDomainsCount === 3) {
     confidenceTone = 'text-[#00E5FF]';
-  } else if (activeDomainsCount === 1) {
-    confidenceLabel = 'Preliminary';
+  } else if (activeDomainsCount > 0) {
     confidenceTone = 'text-[#F59E0B]';
   }
 
-  // Tone and descriptor
+  // Score status label
   let scoreLabel = 'No Logs Today';
   let scoreToneColor = '#00F2A9';
   if (totalScore !== null) {
@@ -108,6 +149,9 @@ export const WellnessScoreHero: React.FC = () => {
       scoreLabel = 'Recovery Focus';
       scoreToneColor = '#A78BFA';
     }
+  } else if (activeDomainsCount > 0) {
+    scoreLabel = 'Needs 3 Domains';
+    scoreToneColor = '#F59E0B';
   }
 
   // Compact Responsive SVG geometry (viewBox 0 0 100 100)
@@ -132,7 +176,7 @@ export const WellnessScoreHero: React.FC = () => {
 
       <div className="p-3.5 sm:p-5 relative z-10">
         <div className="flex flex-col sm:flex-row items-center sm:items-stretch gap-4 sm:gap-6">
-          {/* Circular Score Visualisation (Compact & proportionate: 124px mobile, 140px desktop) */}
+          {/* Circular Score Visualisation */}
           <div className="flex flex-col items-center justify-center shrink-0">
             <div className="relative flex items-center justify-center shrink-0 w-[124px] h-[124px] sm:w-[140px] sm:h-[140px]">
               <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
@@ -212,7 +256,7 @@ export const WellnessScoreHero: React.FC = () => {
             </div>
           </div>
 
-          {/* Balanced Explanation & Active Pillar Calibration (Zero duplicated metrics) */}
+          {/* Balanced Explanation & Active Pillar Calibration */}
           <div className="flex-1 flex flex-col justify-between min-w-0 w-full space-y-3 sm:space-y-2.5">
             {/* Top row: Status Badge & Confidence assessment */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -226,7 +270,7 @@ export const WellnessScoreHero: React.FC = () => {
                 </span>
                 <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline">·</span>
                 <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline font-mono-num">
-                  Daily Composite
+                  5-Pillar Model
                 </span>
               </div>
 
@@ -235,22 +279,23 @@ export const WellnessScoreHero: React.FC = () => {
                   {confidenceLabel}
                 </span>
                 <span className="text-[10px] text-[var(--text-muted)] font-mono-num">
-                  ({activeDomainsCount}/5 pillars)
+                  ({activeDomainsCount}/5 active)
                 </span>
               </div>
             </div>
 
-            {/* Clear explanation of score calculation and calibration */}
+            {/* Clear explanation of 5-pillar weights and threshold */}
             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-              LifeOS personal health index dynamically weighted across your 5 core wellness pillars:
-              Sleep (30%), Activity (30%), Recovery (20%), and Nutrition &amp; Hydration (20%).
+              LifeOS personal wellness index dynamically weighted across your 5 core pillars:
+              Sleep (25%), Activity (25%), Nutrition (20%), Hydration (15%), and Habits/Mindset (15%).
+              Requires at least 3 active domains to display a numerical score.
             </p>
 
-            {/* 5 Pillar Activation Status Strip (Explains score composition without duplicating metric numbers) */}
+            {/* 5 Pillar Activation Status Strip with exact weights */}
             <div className="pt-1">
               <div className="flex items-center justify-between text-[10px] font-mono-num text-[var(--text-muted)] mb-1.5 px-0.5">
                 <span className="uppercase font-semibold tracking-wider">
-                  Today's Pillar Status
+                  Core Pillars &amp; Weights
                 </span>
                 <span className="hidden sm:inline">Tap pillar to view full logs</span>
               </div>
@@ -268,7 +313,7 @@ export const WellnessScoreHero: React.FC = () => {
                           ? 'bg-[var(--card-surface-elevated)] border-[var(--card-border-hover)] hover:border-[#00F2A9]/50 shadow-xs'
                           : 'bg-[var(--bg-subtle)]/60 border-[var(--card-border)] opacity-60 hover:opacity-90'
                       }`}
-                      title={`${domain.name}: ${domain.active ? 'Active today' : 'Awaiting entry'}`}
+                      title={`${domain.name} (${domain.weight}): ${domain.active ? `Active (${domain.score}%)` : 'Awaiting entry'}`}
                     >
                       <div className="flex items-center gap-1 mb-0.5">
                         <Icon
@@ -284,11 +329,14 @@ export const WellnessScoreHero: React.FC = () => {
                       <span className="text-[10px] font-semibold text-[var(--text-primary)] truncate w-full">
                         {domain.name}
                       </span>
+                      <span className="text-[8.5px] font-mono-num text-[var(--text-muted)]">
+                        {domain.weight}
+                      </span>
                       <span
-                        className="text-[9px] font-mono-num truncate"
+                        className="text-[9px] font-mono-num font-medium truncate mt-0.5"
                         style={{ color: domain.active ? domain.color : 'var(--text-muted)' }}
                       >
-                        {domain.active ? 'Logged' : 'Pending'}
+                        {domain.active ? (domain.score !== null ? `${domain.score}%` : 'Logged') : 'Pending'}
                       </span>
                     </button>
                   );
@@ -299,9 +347,17 @@ export const WellnessScoreHero: React.FC = () => {
             {/* Status footnote */}
             <div className="text-[11px] text-[var(--text-muted)] pt-0.5 flex items-center justify-between">
               <span>
-                {totalScore === null
-                  ? 'Log any pillar below or use Quick Actions to calculate today\'s score.'
-                  : 'Scores update in real time with every logged vital, workout, meal, or habit.'}
+                {totalScore === null ? (
+                  activeDomainsCount === 0 ? (
+                    'Log at least 3 pillars (e.g. sleep, water, steps) to activate your numerical score.'
+                  ) : activeDomainsCount === 1 ? (
+                    '1 of 3 required pillars logged. Log 2 more to calculate your numerical score.'
+                  ) : (
+                    '2 of 3 required pillars logged. Log 1 more to calculate your numerical score.'
+                  )
+                ) : (
+                  `${activeDomainsCount} of 5 pillars active. Dynamically normalized across active weights.`
+                )}
               </span>
             </div>
           </div>
